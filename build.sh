@@ -1,12 +1,13 @@
 #!/bin/sh
 
-# TOOLCHAIN="/home/hillbeast/Development/cross/gcc-arm-none-eabi-4_6-2012q4/bin/arm-none-eabi-"
+TOOLCHAIN="arm-none-eabi-"
 CORES=8
 VERSION="Test-`date '+%Y%m%d-%H%M'`"
 
 export KBUILD_BUILD_VERSION=$VERSION
 export ARCH=arm
-# export CROSS_COMPILE=$TOOLCHAIN
+export CROSS_COMPILE=$TOOLCHAIN
+export CC="${CROSS_COMPILE}gcc"
 
 if [ "$1" = "config" ]; then
 	make menuconfig ARCH=arm CROSS_COMPILE=$TOOLCHAIN

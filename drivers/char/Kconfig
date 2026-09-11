@@ -1148,7 +1148,7 @@ config RAMOOPS
 
 config S3C_MEM
 	bool "Support for /dev/s3c-mem"
-	default y
+	default n
 	help
 	  you do say Y here, you can allocate physically linear memory
 endmenu

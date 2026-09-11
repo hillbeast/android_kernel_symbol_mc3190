@@ -436,6 +436,11 @@ config MACH_RAUMFELD_SPEAKER
 	select PXA3xx
 	select CPU_PXA300
 
+config MACH_MC3190
+	bool "Symbol MC3190"
+	select CPU_PXA320
+	select HAVE_PWM
+
 config PXA_SHARPSL
 	bool "SHARP Zaurus SL-5600, SL-C7xx and SL-Cxx00 Models"
 	select SHARP_SCOOP

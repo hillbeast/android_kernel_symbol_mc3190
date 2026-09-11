@@ -81,3 +81,5 @@ GTAGS
 # Custom gitignores for this repository
 *zImage
 build.sh
+arch/arm/boot/compressed/vmlinux
+arch/arm/boot/compressed/piggy.gzip

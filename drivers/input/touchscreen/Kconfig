@@ -621,4 +621,13 @@ config TOUCHSCREEN_TPS6507X
 	  To compile this driver as a module, choose M here: the
 	  module will be called tps6507x_ts.
 
+config TOUCHSCREEN_MC3190
+	bool "Symbol MC3190 Touchscreen"
+	depends on MFD_MC3190_PM
+	help
+	  Say Y here if you want to support the PwrMicro
+	  touchscreen function in the Symbol MC3190 
+
+	  If unsure, say N.	  
+
 endif

@@ -72,3 +72,5 @@ obj-$(CONFIG_PMIC_ADP5520)	+= adp5520.o
 obj-$(CONFIG_LPC_SCH)		+= lpc_sch.o
 obj-$(CONFIG_MFD_RDC321X)	+= rdc321x-southbridge.o
 obj-$(CONFIG_MFD_JANZ_CMODIO)	+= janz-cmodio.o
+obj-$(CONFIG_MFD_MC3190_CPLD)	+= mc3190-cpld.o
+obj-$(CONFIG_MFD_MC3190_PM)		+= mc3190-micro.o

@@ -109,6 +109,38 @@ config UCB1400_CORE
 	  To compile this driver as a module, choose M here: the
 	  module will be called ucb1400_core.
 
+config MFD_MC3190_CPLD
+	bool "Symbol MC3190 CPLD chip"
+	depends on MACH_MC3190
+	select MFD_CORE
+	help
+	  The Symbol MC3190 features a Xilinx XC2C256 CPLD that handles
+	  various hardware functions, including backlight and LCD control,
+	  SD card presence detect, the barcode scanner, and other still
+	  unknown functionality.
+
+	  Select Y to enable this driver
+
+config MFD_MC3190_CPLD_DEBUG
+	bool "Debug reads and writes to Symbol MC3190 CPLD"
+	depends on MFD_MC3190_CPLD
+	help
+	  Shows reads and writes to CPLD registers, and does a pre-read
+	  before writes and a readback to verify writes stuck.
+
+config MFD_MC3190_PM
+	bool "Symbol MC3190 PwrMicro chip"
+	depends on MACH_MC3190
+	help
+	  Say Y here to enable support for the PwrMicro AVR controller
+	  in the Symbol MC3190.
+
+config MFD_MC3190_PM_DEBUG
+	bool "Symbol MC3190 PwrMicro Debug Mode"
+	depends on MFD_MC3190_PM
+	help
+	  Say Y here to enable debugging output to dmesg for PwrMicro
+
 config TPS65010
 	tristate "TPS6501x Power Management chips"
 	depends on I2C && GPIOLIB

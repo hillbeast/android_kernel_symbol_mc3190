@@ -307,6 +307,14 @@ config BACKLIGHT_PCF50633
 	  If you have a backlight driven by a NXP PCF50633 MFD, say Y here to
 	  enable its driver.
 
+config BACKLIGHT_MC3190
+	tristate "Backlight driver for Symbol MC3190"
+	depends on MACH_MC3190 && MFD_MC3190_CPLD
+	default y
+	help
+	  If you have a Symbol MC3190, say Y to enable the
+	  backlight driver.
+
 endif # BACKLIGHT_CLASS_DEVICE
 
 endif # BACKLIGHT_LCD_SUPPORT
