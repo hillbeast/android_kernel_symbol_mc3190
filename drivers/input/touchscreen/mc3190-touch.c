@@ -55,7 +55,7 @@ EXPORT_SYMBOL_GPL(mc3190_touch_report);
 static int mc3190_touch_probe(struct platform_device *pdev)
 {
 	struct mc3190_touch *touch;
-	struct mc3190_pwrmicro *core = dev_get_platdata(&pdev->dev);
+	struct mc3190_pwrmicro *core = dev_get_drvdata(pdev->dev.parent);
 	int ret;
 
 	touch = devm_kzalloc(&pdev->dev, sizeof(*touch), GFP_KERNEL);

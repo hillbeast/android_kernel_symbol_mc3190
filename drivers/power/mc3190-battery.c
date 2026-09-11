@@ -154,7 +154,7 @@ static int mc3190_battery_get_property(struct power_supply *psy,
 static int mc3190_battery_probe(struct platform_device *pdev)
 {
 	struct mc3190_battery *bat;
-	struct mc3190_pwrmicro *core = dev_get_platdata(&pdev->dev);
+	struct mc3190_pwrmicro *core = dev_get_drvdata(pdev->dev.parent);
 	int ret;
 
 	if (!core) {

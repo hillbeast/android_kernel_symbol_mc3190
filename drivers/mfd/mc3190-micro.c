@@ -497,9 +497,6 @@ static int mc3190_pwrmicro_probe(struct platform_device *pdev)
 	INIT_WORK(&priv->rx_work, mc3190_rx_work_fn);
 	INIT_DELAYED_WORK(&priv->ready_work, mc3190_ready_work_fn);
 
-	mc3190_cells[0].platform_data = priv;
-	mc3190_cells[1].platform_data = priv;
-
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
 	if (!res)
 		return -ENODEV;
@@ -550,7 +547,12 @@ static int mc3190_pwrmicro_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, priv);
 	dev_info(&pdev->dev, "MC3190 PwrMicro driver active (IRQ%d)\n", priv->irq); // FIXME: get PM version from device
 
-	mfd_add_devices(&pdev->dev, -1, mc3190_cells, ARRAY_SIZE(mc3190_cells), NULL, 0);
+	ret = mfd_add_devices(&pdev->dev, -1, mc3190_cells, ARRAY_SIZE(mc3190_cells), NULL, 0);
+	if (ret) {
+		dev_err(&pdev->dev, "failed to add MFD devices: %d\n", ret);
+		return ret;
+	}
+	
 	return 0;
 }
 
