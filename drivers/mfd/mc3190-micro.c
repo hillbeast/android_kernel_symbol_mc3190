@@ -388,8 +388,10 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 		if (priv->in_state_machine) {
 			switch (priv->state_machine) {
 			case PWRMICRO_STATE_TOUCH:
+#ifdef CONFIG_TOUCHSCREEN_MC3190
 				if (priv->touch_input)
 					mc3190_touch_report(priv->touch_input, 0, 0, PWRMICRO_TOUCH_UP);
+#endif // CONFIG_TOUCHSCREEN_MC3190
 				break;
 			default:
 				break;
