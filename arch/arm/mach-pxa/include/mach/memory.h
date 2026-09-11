@@ -16,22 +16,13 @@
  * Physical DRAM offset.
  */
 
-#ifndef CONFIG_MACH_MC3190
 
 #define PHYS_OFFSET	UL(0xa0000000)
 
-#else // CONFIG_MACH_MC3190
-
-#define PHYS_OFFSET	UL(0x80000000)
-#define PLAT_PHYS_OFFSET UL(0x80000000)
-
 #ifdef CONFIG_SPARSEMEM
-
 #define MAX_PHYSMEM_BITS        32
 #define SECTION_SIZE_BITS       27
 #endif // CONFIG_SPARSEMEM
-
-#endif // CONFIG_MACH_MC3190
 
 /*
  * The nodes are matched with the physical SDRAM banks as follows:

@@ -554,7 +554,7 @@ static void __init mc3190_init(void)
 
 MACHINE_START(MC3190, "Symbol MC3190")
 	.phys_io	= 0x40000000,
-	.boot_params	= 0x80FE0000,
+	.boot_params	= 0xA0000100,
 	.io_pg_offst	= (io_p2v(0x40000000) >> 18) & 0xfffc,
 	.map_io		= pxa_map_io,
 	.init_irq	= pxa3xx_init_irq,
