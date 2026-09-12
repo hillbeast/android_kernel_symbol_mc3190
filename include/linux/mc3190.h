@@ -92,6 +92,8 @@ struct avr_register {
 	u8 alternate_initiator;
 };
 
+struct mc3190_touch;
+
 struct mc3190_pwrmicro {
 	struct device *dev;
 	void __iomem *regs;
@@ -113,7 +115,7 @@ struct mc3190_pwrmicro {
 	bool have_reply;
 	u32  last_reply;
 
-	struct input_dev *touch_input;
+	struct mc3190_touch *touch_dev;
 	struct power_supply *battery_psy;
 
 	bool in_state_machine;
@@ -132,11 +134,8 @@ struct mc3190_pwrmicro {
 
 };
 
-struct mc3190_micro;
-
-struct mc3190_pwrmicro;
-void mc3190_set_touch_input(struct mc3190_pwrmicro *core, struct input_dev *input);
-void mc3190_touch_report(struct input_dev *input, u16 x, u16 y, bool touchstate);
+void mc3190_set_touch_dev(struct mc3190_pwrmicro *core, struct mc3190_touch *touch);
+void mc3190_touch_report(struct mc3190_touch *touch, u16 x, u16 y, bool touchstate);
 
 void mc3190_set_battery_psy(struct mc3190_pwrmicro *priv, struct power_supply *psy);
 int mc3190_get_battery_voltage(struct mc3190_pwrmicro *priv);

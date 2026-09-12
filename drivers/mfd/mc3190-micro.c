@@ -292,12 +292,17 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 	switch (tag) {
 	case MC3190_TAG_TOUCH_DATA: {
 		u16 y = rx_word & 0xFFF;
-		u16 x = ((rx_word >> 12) & 0xFF0) | ((rx_word & 0xF000) >> 4);
-		dev_dbg(priv->dev, "touch data: raw=0x%08x x=%u y=%u\n", rx_word, x, y);
+		u16 x = (rx_word >> 0xc & 0xff0 | rx_word & 0xf000) >> 4;
 
+
+#ifdef CONFIG_MFD_MC3190_PM_DEBUG
+		dev_info(priv->dev, "touch data: raw=0x%08x x=%u y=%u\n", rx_word, x, y);
+#else
+		dev_dbg(priv->dev, "touch data: raw=0x%08x x=%u y=%u\n", rx_word, x, y);
+#endif
 #ifdef CONFIG_TOUCHSCREEN_MC3190
-		if (priv->touch_input)
-			mc3190_touch_report(priv->touch_input, x, y, PWRMICRO_TOUCH_DOWN);
+		if (priv->touch_dev)
+			mc3190_touch_report(priv->touch_dev, x, y, PWRMICRO_TOUCH_DOWN);
 #endif // CONFIG_TOUCHSCREEN_MC3190
 
 		priv->in_state_machine = true;
@@ -384,13 +389,17 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 		break;
 
 	case MC3190_TAG_SYS_ACK:
+#ifdef CONFIG_MFD_MC3190_PM_DEBUG
+		dev_info(priv->dev, "ACK Tag (rx_word=0x%08x)\n", rx_word);
+#else
 		dev_dbg(priv->dev, "ACK Tag (rx_word=0x%08x)\n", rx_word);
+#endif
 		if (priv->in_state_machine) {
 			switch (priv->state_machine) {
 			case PWRMICRO_STATE_TOUCH:
 #ifdef CONFIG_TOUCHSCREEN_MC3190
-				if (priv->touch_input)
-					mc3190_touch_report(priv->touch_input, 0, 0, PWRMICRO_TOUCH_UP);
+				if (priv->touch_dev)
+					mc3190_touch_report(priv->touch_dev, 0, 0, PWRMICRO_TOUCH_UP);
 #endif // CONFIG_TOUCHSCREEN_MC3190
 				break;
 			default:
@@ -471,11 +480,11 @@ static irqreturn_t mc3190_ssp4_irq(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-void mc3190_set_touch_input(struct mc3190_pwrmicro *priv, struct input_dev *input)
+void mc3190_set_touch_dev(struct mc3190_pwrmicro *priv, struct mc3190_touch *touch)
 {
-	priv->touch_input = input;
+	priv->touch_dev = touch;
 }
-EXPORT_SYMBOL_GPL(mc3190_set_touch_input);
+EXPORT_SYMBOL_GPL(mc3190_set_touch_dev);
 
 static int mc3190_pwrmicro_probe(struct platform_device *pdev)
 {

@@ -21,34 +21,77 @@
 #include <linux/platform_device.h>
 #include <linux/input.h>
 #include <linux/slab.h>
+#include <linux/jiffies.h>
 
 #include <linux/mc3190.h>
 
 #define DRV_NAME "mc3190-touch"
 
-#define MC3190_TOUCH_X_MIN   688    // FIXME: TBC
-#define MC3190_TOUCH_X_MAX   4080   // FIXME: TBC
-#define MC3190_TOUCH_Y_MIN   42     // FIXME: TBC
-#define MC3190_TOUCH_Y_MAX   991    // FIXME: TBC
+
+#define MC3190_TOUCH_X_MIN   0
+#define MC3190_TOUCH_X_MAX   1023
+#define MC3190_TOUCH_X_FUZZ  80
+#define MC3190_TOUCH_Y_MIN   0
+#define MC3190_TOUCH_Y_MAX   1023
+#define MC3190_TOUCH_Y_FUZZ  10
+
+
 
 struct mc3190_touch {
 	struct device *dev;
 	struct input_dev *input;
+	long x_accum;
+	long y_accum;
+	unsigned int sample_count;
 };
 
-void mc3190_touch_report(struct input_dev *input, u16 x, u16 y, bool touchstate)
+#define MC3190_MIN_SAMPLES    3     /* accumulate before first report */
+#define MC3190_REPORT_SAMPLES 6     /* report every N samples (~48ms at 8ms rate) */
+
+void mc3190_touch_report(struct mc3190_touch *touch, u16 x, u16 y, bool touchstate)
 {
+	struct input_dev *input = touch->input;
 	if (!input)
 		return;
+	if (touchstate == PWRMICRO_TOUCH_DOWN) {
+		x = MC3190_TOUCH_X_MAX - x;
+		y = MC3190_TOUCH_Y_MAX - y;
 
-    if (touchstate == PWRMICRO_TOUCH_DOWN) {
-        input_report_abs(input, ABS_X, x);
-        input_report_abs(input, ABS_Y, y);
-        input_report_key(input, BTN_TOUCH, 1);
-    } else {
-        input_report_key(input, BTN_TOUCH, 0);
-    }
-	input_sync(input);
+		touch->x_accum += x;
+		touch->y_accum += y;
+		touch->sample_count++;
+		if (touch->sample_count >= MC3190_REPORT_SAMPLES) {
+			u16 x_avg = touch->x_accum / touch->sample_count;
+			u16 y_avg = touch->y_accum / touch->sample_count;
+			input_report_abs(input, ABS_X, x_avg);
+			input_report_abs(input, ABS_Y, y_avg);
+			input_report_key(input, BTN_TOUCH, 1);
+			input_sync(input);
+			touch->x_accum = x;
+			touch->y_accum = y;
+			touch->sample_count = 1;
+		} else if (touch->sample_count == MC3190_MIN_SAMPLES) {
+			u16 x_avg = touch->x_accum / touch->sample_count;
+			u16 y_avg = touch->y_accum / touch->sample_count;
+			input_report_abs(input, ABS_X, x_avg);
+			input_report_abs(input, ABS_Y, y_avg);
+			input_report_key(input, BTN_TOUCH, 1);
+			input_sync(input);
+		}
+	} else {
+		if (touch->sample_count >= MC3190_MIN_SAMPLES) {
+			u16 x_avg = touch->x_accum / touch->sample_count;
+			u16 y_avg = touch->y_accum / touch->sample_count;
+			input_report_abs(input, ABS_X, x_avg);
+			input_report_abs(input, ABS_Y, y_avg);
+			input_sync(input);
+		}
+		touch->x_accum = 0;
+		touch->y_accum = 0;
+		touch->sample_count = 0;
+		input_report_key(input, BTN_TOUCH, 0);
+		input_sync(input);
+	}
 }
 EXPORT_SYMBOL_GPL(mc3190_touch_report);
 
@@ -76,8 +119,8 @@ static int mc3190_touch_probe(struct platform_device *pdev)
 	__set_bit(EV_KEY, touch->input->evbit);
 	__set_bit(BTN_TOUCH, touch->input->keybit);
 
-	input_set_abs_params(touch->input, ABS_X, MC3190_TOUCH_X_MIN, MC3190_TOUCH_X_MAX, 0, 0);
-	input_set_abs_params(touch->input, ABS_Y, MC3190_TOUCH_Y_MIN, MC3190_TOUCH_Y_MAX, 0, 0);
+	input_set_abs_params(touch->input, ABS_X, MC3190_TOUCH_X_MIN, MC3190_TOUCH_X_MAX, MC3190_TOUCH_X_FUZZ, 0);
+	input_set_abs_params(touch->input, ABS_Y, MC3190_TOUCH_Y_MIN, MC3190_TOUCH_Y_MAX, MC3190_TOUCH_Y_FUZZ, 0);
 
 	ret = input_register_device(touch->input);
 	if (ret) {
@@ -87,7 +130,7 @@ static int mc3190_touch_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, touch);
-	mc3190_set_touch_input(core, touch->input);
+	mc3190_set_touch_dev(core, touch);
 
 	dev_info(&pdev->dev, "MC3190 touchscreen driver registered\n");
 	return 0;
