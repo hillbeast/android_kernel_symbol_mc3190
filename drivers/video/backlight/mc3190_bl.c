@@ -31,7 +31,7 @@ static void mc3190_bl_power_on(struct mc3190_bl_data *d)
 {
 	// The device is a blackbox so the following code is just imitating what Windows CE does
 	// Write to CPLD that the backlight needs turned on
-	mc3190_cpld_write(MC3190_CPLD_LCD_BL_BIT, MC3190_CPLD_REG_LCD_1);
+	mc3190_cpld_rmw(MC3190_CPLD_LCD_BL_BIT, 0xFFFF, MC3190_CPLD_REG_LCD_1);
 	mdelay(15);
 
 	// Set the backlight brightness. CPLD handles the brightness change

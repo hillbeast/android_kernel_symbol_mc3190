@@ -53,6 +53,7 @@ struct mc3190_bl_data {
 
 extern u16 mc3190_cpld_read(unsigned int reg);
 extern void mc3190_cpld_write(u16 val, unsigned int reg);
+extern void mc3190_cpld_rmw(u16 ormask, u16 andmask, unsigned int reg);
 
 /*
  * AVR Microcontroller MFD Device

@@ -48,7 +48,7 @@ void mc3190_cpld_write(u16 val, unsigned int reg)
     unsigned long flags;
 
 #ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
-    pr_info("%s: pre-read from CPLD\n", __func__, val, reg);
+    pr_info("%s: pre-read from CPLD\n", __func__);
     mc3190_cpld_read(reg);
 
     pr_info("%s: writing 0x%04x to register 0x%02x\n", __func__, val, reg);
@@ -59,11 +59,33 @@ void mc3190_cpld_write(u16 val, unsigned int reg)
     spin_unlock_irqrestore(&cpld_lock, flags);
 
 #ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
-    pr_info("%s: readback\n", __func__, val, reg);
+    pr_info("%s: readback\n", __func__);
     mc3190_cpld_read(reg);
 #endif
 }
 EXPORT_SYMBOL_GPL(mc3190_cpld_write);
+
+void mc3190_cpld_rmw(u16 ormask, u16 andmask, unsigned int reg)
+{
+    unsigned long flags;
+    u16 val;
+
+#ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
+    val = (mc3190_cpld_read(reg) & andmask) | ormask;
+
+    pr_info("%s: writing 0x%04x to register 0x%02x\n", __func__, val, reg);
+#endif
+
+    spin_lock_irqsave(&cpld_lock, flags);
+    writew(val, cpld_base + reg);
+    spin_unlock_irqrestore(&cpld_lock, flags);
+
+#ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
+    pr_info("%s: readback\n", __func__);
+    mc3190_cpld_read(reg);
+#endif
+}
+EXPORT_SYMBOL_GPL(mc3190_cpld_rmw);
 
 static int __devinit mc3190_cpld_probe(struct platform_device *pdev)
 {
