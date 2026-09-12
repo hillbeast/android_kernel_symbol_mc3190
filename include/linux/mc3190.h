@@ -34,6 +34,13 @@ struct mc3190_bl_data {
  * CPLD Definitions
  */
 
+/* 
+ * NOTE: Potential discovery that needs confirmation:
+ * Learnt from getting audio amp working, the enable register is at the base
+ * 0x28, and then the disable register is 0x28 + 0x02. This could be a pattern
+ * used in the LCD as well where registers are at 0x1c and 0x1e.
+ */
+
 #define MC3190_CPLD_BASE            0x14020000
 #define MC3190_CPLD_SZ              0x80
 
@@ -41,6 +48,7 @@ struct mc3190_bl_data {
 #define MC3190_CPLD_REG_LCD_1       0x1c
 #define MC3190_CPLD_REG_LCD_2       0x1e
 #define MC3190_CPLD_REG_USB_STATUS	0x24
+#define MC3190_CPLD_REG_AUDIO		0x28
 #define MC3190_CPLD_REG_LCD_3       0x74
 #define MC3190_CPLD_REG_LCD_4       0x76
 
@@ -51,6 +59,8 @@ struct mc3190_bl_data {
 #define MC3190_CPLD_LCD_LCD_RB_BIT  (1 << 4)
 
 #define MC3190_CPLD_USB_CONNECTED_BIT	(1 << 5)
+
+#define MC3190_CPLD_AUDIOAMP_ON_BIT	(1 << 1)
 
 
 extern u16 mc3190_cpld_read(unsigned int reg);

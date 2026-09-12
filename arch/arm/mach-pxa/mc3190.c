@@ -42,15 +42,10 @@
 int lcd_id;
 int lcd_orientation;
 
-struct platform_device pxa_device_wm9713_audio = {
+struct platform_device mc3190_wm9713_audio = {
 	.name		= "wm9713-codec",
 	.id		= -1,
 };
-
-static void __init mc3190_init_wm9713_audio(void)
-{
-	platform_device_register(&pxa_device_wm9713_audio);
-}
 
 static mfp_cfg_t mfp_cfg[] __initdata = {
 	/* LCD */
@@ -574,6 +569,7 @@ static struct platform_device *mc3190_devices[] __initdata = {
 	&pxa_spi_ssp3,
 	&mc3190_pwrmicro_device,
 	&mc3190_android_usb_device,
+	&mc3190_wm9713_audio,
 };
 
 static int __init mc3190_cpld_device_init(void)
@@ -595,7 +591,6 @@ static void __init mc3190_init(void)
 	mc3190_init_mmc();
 	mc3190_init_keypad();
 //	mc3190_init_nand(); 			// FIXME: Disabled as this interferes with data/address lines to CPLD
-	mc3190_init_wm9713_audio();
 
 	platform_device_register(&mc3190_device_leds);
 
