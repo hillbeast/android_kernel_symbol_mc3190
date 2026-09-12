@@ -1852,6 +1852,20 @@ config FB_PXA_PARAMETERS
 
 	  <file:Documentation/fb/pxafb.txt> describes the available parameters.
 
+config FB_PXA_CACHECOHERENT
+	bool "PXA Use Cache Coherency"
+	default n
+	depends on FB_PXA
+	---help---
+	  Enable the use of cache coherent writes to frame buffer
+
+	  Some platforms and MMU configurations cause the frame buffer to
+	  lose some updates inside the cache and this results in blocks of
+	  horizontal pixels being stuck until another framebuffer write happens
+	  and the data is eventually flushed from cache.
+	  
+	  This option should be used if the framebuffer does not draw correctly.	  
+
 config FB_MBX
 	tristate "2700G LCD framebuffer support"
 	depends on FB && ARCH_PXA

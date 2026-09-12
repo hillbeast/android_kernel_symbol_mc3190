@@ -1678,11 +1678,18 @@ static int __devinit pxafb_init_video_memory(struct pxafb_info *fbi)
 {
 	int size = PAGE_ALIGN(fbi->video_mem_size);
 
+#ifdef CONFIG_FB_PXA_CACHECOHERENT
+	fbi->video_mem = dma_alloc_writecombine(fbi->dev, size,
+					&fbi->video_mem_phys, GFP_KERNEL);
+#else
 	fbi->video_mem = alloc_pages_exact(size, GFP_KERNEL | __GFP_ZERO);
+#endif
 	if (fbi->video_mem == NULL)
 		return -ENOMEM;
 
+#ifndef CONFIG_FB_PXA_CACHECOHERENT
 	fbi->video_mem_phys = virt_to_phys(fbi->video_mem);
+#endif
 	fbi->video_mem_size = size;
 
 	fbi->fb.fix.smem_start	= fbi->video_mem_phys;
@@ -2209,7 +2216,11 @@ failed_free_cmap:
 failed_free_irq:
 	free_irq(irq, fbi);
 failed_free_mem:
+#ifdef CONFIG_FB_PXA_CACHECOHERENT
+	dma_free_writecombine(fbi->dev, fbi->video_mem_size, fbi->video_mem, fbi->video_mem_phys);
+#else
 	free_pages_exact(fbi->video_mem, fbi->video_mem_size);
+#endif
 failed_free_dma:
 	dma_free_coherent(&dev->dev, fbi->dma_buff_size,
 			fbi->dma_buff, fbi->dma_buff_phys);
@@ -2248,7 +2259,11 @@ static int __devexit pxafb_remove(struct platform_device *dev)
 	irq = platform_get_irq(dev, 0);
 	free_irq(irq, fbi);
 
+#ifdef CONFIG_FB_PXA_CACHECOHERENT	
+	dma_free_writecombine(fbi->dev, fbi->video_mem_size, fbi->video_mem, fbi->video_mem_phys);
+#else
 	free_pages_exact(fbi->video_mem, fbi->video_mem_size);
+#endif
 
 	dma_free_writecombine(&dev->dev, fbi->dma_buff_size,
 			fbi->dma_buff, fbi->dma_buff_phys);
