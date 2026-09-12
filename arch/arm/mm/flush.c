@@ -189,6 +189,7 @@ static void __flush_dcache_aliases(struct address_space *mapping, struct page *p
 	struct vm_area_struct *mpnt;
 	struct prio_tree_iter iter;
 	pgoff_t pgoff;
+	unsigned long flags;
 
 	/*
 	 * There are possible user space mappings of this page:
@@ -198,7 +199,11 @@ static void __flush_dcache_aliases(struct address_space *mapping, struct page *p
 	 */
 	pgoff = page->index << (PAGE_CACHE_SHIFT - PAGE_SHIFT);
 
+#ifdef CONFIG_ANDROID
+	local_irq_save(flags);
+#else
 	flush_dcache_mmap_lock(mapping);
+#endif
 	vma_prio_tree_foreach(mpnt, &iter, &mapping->i_mmap, pgoff, pgoff) {
 		unsigned long offset;
 
@@ -212,7 +217,11 @@ static void __flush_dcache_aliases(struct address_space *mapping, struct page *p
 		offset = (pgoff - mpnt->vm_pgoff) << PAGE_SHIFT;
 		flush_cache_page(mpnt, mpnt->vm_start + offset, page_to_pfn(page));
 	}
+#ifdef CONFIG_ANDROID
+	local_irq_restore(flags);
+#else
 	flush_dcache_mmap_unlock(mapping);
+#endif
 }
 
 /*

@@ -89,7 +89,10 @@ static int adjust_pte(struct vm_area_struct *vma, unsigned long address,
 	 */
 	ptl = pte_lockptr(vma->vm_mm, pmd);
 	pte = pte_offset_map_nested(pmd, address);
-	spin_lock(ptl);
+	if (!spin_trylock(ptl)) {
+		pte_unmap_nested(pte);
+		return 0;
+	}
 
 	ret = do_adjust_pte(vma, address, pfn, pte);
 
@@ -107,6 +110,7 @@ make_coherent(struct address_space *mapping, struct vm_area_struct *vma,
 	struct vm_area_struct *mpnt;
 	struct prio_tree_iter iter;
 	unsigned long offset;
+	unsigned long flags;
 	pgoff_t pgoff;
 	int aliases = 0;
 
@@ -117,7 +121,11 @@ make_coherent(struct address_space *mapping, struct vm_area_struct *vma,
 	 * space, then we need to handle them specially to maintain
 	 * cache coherency.
 	 */
+#ifdef CONFIG_ANDROID
+	local_irq_save(flags);
+#else
 	flush_dcache_mmap_lock(mapping);
+#endif
 	vma_prio_tree_foreach(mpnt, &iter, &mapping->i_mmap, pgoff, pgoff) {
 		/*
 		 * If this VMA is not in our MM, we can ignore it.
@@ -131,7 +139,11 @@ make_coherent(struct address_space *mapping, struct vm_area_struct *vma,
 		offset = (pgoff - mpnt->vm_pgoff) << PAGE_SHIFT;
 		aliases += adjust_pte(mpnt, mpnt->vm_start + offset, pfn);
 	}
+#ifdef CONFIG_ANDROID
+	local_irq_restore(flags);
+#else
 	flush_dcache_mmap_unlock(mapping);
+#endif
 	if (aliases)
 		do_adjust_pte(vma, addr, pfn, ptep);
 }
