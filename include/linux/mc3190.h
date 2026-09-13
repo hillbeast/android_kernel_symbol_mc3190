@@ -40,6 +40,7 @@ struct mc3190_bl_data {
 #define MC3190_CPLD_REG_VERSION     0x00
 #define MC3190_CPLD_REG_LCD_1       0x1c
 #define MC3190_CPLD_REG_LCD_2       0x1e
+#define MC3190_CPLD_REG_USB_STATUS	0x24
 #define MC3190_CPLD_REG_LCD_3       0x74
 #define MC3190_CPLD_REG_LCD_4       0x76
 
@@ -49,6 +50,7 @@ struct mc3190_bl_data {
 #define MC3190_CPLD_LCD_BL_BIT      (1 << 3)
 #define MC3190_CPLD_LCD_LCD_RB_BIT  (1 << 4)
 
+#define MC3190_CPLD_USB_CONNECTED_BIT	(1 << 5)
 
 
 extern u16 mc3190_cpld_read(unsigned int reg);

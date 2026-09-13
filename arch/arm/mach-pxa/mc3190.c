@@ -19,6 +19,7 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
+#include <linux/usb/android_composite.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
@@ -29,6 +30,7 @@
 #include <mach/pxa320.h>
 #include <mach/pxafb.h>
 #include <mach/pxa27x_keypad.h>
+#include <mach/udc.h>
 #include <plat/pxa3xx_nand.h>
 
 #include <linux/mc3190.h>
@@ -518,9 +520,60 @@ struct platform_device pxa_spi_ssp3 = {
 	}
 };
 
+static int mc3190_udc_is_connected(void)
+{
+    return !!(mc3190_cpld_read(MC3190_CPLD_REG_USB_STATUS) &
+              MC3190_CPLD_USB_CONNECTED_BIT);
+}
+
+static void mc3190_udc_command(int command)
+{
+    switch (command) {
+    case PXA2XX_UDC_CMD_CONNECT:
+		pr_info("%s: PXA2XX_UDC_CMD_CONNECT\n", __func__);
+		// FIXME: Add code
+        break;
+    case PXA2XX_UDC_CMD_DISCONNECT:
+		pr_info("%s: PXA2XX_UDC_CMD_DISCONNECT\n", __func__);
+		// FIXME: Add code
+        break;
+    }
+}
+
+static struct pxa2xx_udc_mach_info mc3190_udc_info __initdata = {
+    .udc_is_connected = mc3190_udc_is_connected,
+	.gpio_pullup = -1,
+    .gpio_vbus = -1,
+	.udc_command = mc3190_udc_command,
+};
+
+static char *mc3190_usb_functions[] = {
+    "adb",
+};
+
+static struct android_usb_platform_data mc3190_android_usb_pdata = {
+    .vendor_id          = 0x05E0,
+    .product_id         = 0x2001,
+    .version            = 0x0100,
+    .product_name       = "MC3190",
+    .manufacturer_name  = "Symbol Technologies",
+    .serial_number      = "MC3190000001",
+    .num_functions      = ARRAY_SIZE(mc3190_usb_functions),
+    .functions          = mc3190_usb_functions,
+};
+
+static struct platform_device mc3190_android_usb_device = {
+    .name   = "android_usb",
+    .id     = -1,
+    .dev    = {
+        .platform_data = &mc3190_android_usb_pdata,
+    },
+};
+
 static struct platform_device *mc3190_devices[] __initdata = {
 	&pxa_spi_ssp3,
 	&mc3190_pwrmicro_device,
+	&mc3190_android_usb_device,
 };
 
 static int __init mc3190_cpld_device_init(void)
@@ -548,6 +601,8 @@ static void __init mc3190_init(void)
 
 	platform_add_devices(ARRAY_AND_SIZE(mc3190_devices));
 	spi_register_board_info(ARRAY_AND_SIZE(mc3190_lcd_spi_board_info));
+
+    pxa_set_udc_info(&mc3190_udc_info);
 
 //	mc3190_init_ohci();
 }

@@ -70,9 +70,9 @@ void mc3190_cpld_rmw(u16 ormask, u16 andmask, unsigned int reg)
     unsigned long flags;
     u16 val;
 
-#ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
     val = (mc3190_cpld_read(reg) & andmask) | ormask;
 
+#ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
     pr_info("%s: writing 0x%04x to register 0x%02x\n", __func__, val, reg);
 #endif
 
