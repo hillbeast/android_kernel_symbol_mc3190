@@ -768,6 +768,15 @@ static void req_done(struct pxa_ep *ep, struct pxa27x_request *req, int status,
 	if (pflags)
 		spin_unlock_irqrestore(&ep->lock, *pflags);
 	local_irq_save(flags);
+
+	if (!req->udc_usb_ep || !req->req.complete) {
+		dev_err(ep->dev->dev, "invalid USB request; skipping callback\n");
+		local_irq_restore(flags);
+		if (pflags)
+			spin_lock_irqsave(&ep->lock, *pflags);
+		return;
+	}
+
 	req->req.complete(&req->udc_usb_ep->usb_ep, &req->req);
 	local_irq_restore(flags);
 	if (pflags)
@@ -1735,6 +1744,7 @@ static __init void udc_init_data(struct pxa_udc *dev)
 	/* PXA endpoints init */
 	for (i = 0; i < NR_PXA_ENDPOINTS; i++) {
 		ep = &dev->pxa_ep[i];
+		ep->dev = dev;
 
 		ep->enabled = is_ep0(ep);
 		INIT_LIST_HEAD(&ep->queue);
@@ -1935,6 +1945,13 @@ static void handle_ep0_ctrl_req(struct pxa_udc *udc,
 	int have_extrabytes = 0;
 	unsigned long flags;
 
+	if (!udc->driver) {
+		dev_err(udc->dev, "ctrl req with no driver bound, stalling\n");
+		ep_write_UDCCSR(ep, UDCCSR0_FST);
+		ep0_idle(udc);
+		return;
+	}
+	
 	nuke(ep, -EPROTO);
 	spin_lock_irqsave(&ep->lock, flags);
 
@@ -1976,6 +1993,10 @@ static void handle_ep0_ctrl_req(struct pxa_udc *udc,
 	ep_write_UDCCSR(ep, UDCCSR0_SA | UDCCSR0_OPC);
 
 	spin_unlock_irqrestore(&ep->lock, flags);
+	if (!udc->driver) {
+			spin_lock_irqsave(&ep->lock, flags);
+			goto stall;
+	}
 	i = udc->driver->setup(&udc->gadget, &u.r);
 	spin_lock_irqsave(&ep->lock, flags);
 	if (i < 0)
@@ -2077,8 +2098,12 @@ static void handle_ep0(struct pxa_udc *udc, int fifo_irq, int opc_irq)
 		break;
 	case SETUP_STAGE:
 		udccsr0 &= UDCCSR0_CTRL_REQ_MASK;
-		if (likely(udccsr0 == UDCCSR0_CTRL_REQ_MASK))
-			handle_ep0_ctrl_req(udc, req);
+		if (likely(udccsr0 == UDCCSR0_CTRL_REQ_MASK)) {
+			if (udc->driver)
+				handle_ep0_ctrl_req(udc, req);
+			else
+				ep0_idle(udc);
+		}
 		break;
 	case IN_DATA_STAGE:			/* GET_DESCRIPTOR */
 		if (epout_has_pkt(ep))
@@ -2203,7 +2228,8 @@ static void pxa27x_change_configuration(struct pxa_udc *udc, int config)
 	req.wLength = 0;
 
 	set_ep0state(udc, WAIT_ACK_SET_CONF_INTERF);
-	udc->driver->setup(&udc->gadget, &req);
+	if (udc->driver)
+		udc->driver->setup(&udc->gadget, &req);
 	ep_write_UDCCSR(&udc->pxa_ep[0], UDCCSR0_AREN);
 }
 
@@ -2232,7 +2258,8 @@ static void pxa27x_change_interface(struct pxa_udc *udc, int iface, int alt)
 	req.wLength = 0;
 
 	set_ep0state(udc, WAIT_ACK_SET_CONF_INTERF);
-	udc->driver->setup(&udc->gadget, &req);
+	if (udc->driver)
+		udc->driver->setup(&udc->gadget, &req);
 	ep_write_UDCCSR(&udc->pxa_ep[0], UDCCSR0_AREN);
 }
 
@@ -2322,6 +2349,8 @@ static void irq_udc_resume(struct pxa_udc *udc)
  */
 static void irq_udc_reconfig(struct pxa_udc *udc)
 {
+	if (!udc->driver)
+		return;
 	unsigned config, interface, alternate, config_change;
 	u32 udccr = udc_readl(udc, UDCCR);
 
