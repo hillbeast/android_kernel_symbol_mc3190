@@ -333,6 +333,26 @@ config KEYBOARD_PXA27x
 	  To compile this driver as a module, choose M here: the
 	  module will be called pxa27x_keypad.
 
+config KEYBOARD_PXA27x_FN
+	bool "PXA27x/3xx keypad FN key support"
+	depends on KEYBOARD_PXA27x
+	help
+	  Enable FN function key support on PXA27x keypad.
+
+config KEYBOARD_PXA27x_FN_ROW
+	int "PXA27x FN Key Row"
+	depends on KEYBOARD_PXA27x_FN
+	default 2
+	help
+	  Set PXA27x keypad matrix row for FN key
+
+config KEYBOARD_PXA27x_FN_COL
+	int "PXA27x FN Key Column"
+	depends on KEYBOARD_PXA27x_FN
+	default 2
+	help
+	  Set PXA27x keypad matrix column for FN key
+
 config KEYBOARD_PXA930_ROTARY
 	tristate "PXA930/PXA935 Enhanced Rotary Controller Support"
 	depends on CPU_PXA930 || CPU_PXA935

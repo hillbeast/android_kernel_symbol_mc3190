@@ -33,6 +33,8 @@ struct pxa27x_keypad_platform_data {
 	unsigned int	matrix_key_cols;
 	unsigned int	*matrix_key_map;
 	int		matrix_key_map_size;
+	unsigned int	*matrix_key_map_fn;
+	int		matrix_key_map_fn_size;
 
 	/* direct keys */
 	int		direct_key_num;

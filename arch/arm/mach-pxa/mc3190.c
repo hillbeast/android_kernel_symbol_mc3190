@@ -399,32 +399,47 @@ static unsigned int mc3190_matrix_key_map[] = {
  	KEY(0, 1, KEY_BACK),		/* Right red button */
 
 	/* Num Keys */
-	KEY(2, 0, KEY_7), 		  KEY(0, 2, KEY_8), KEY(1, 0, KEY_9),   KEY(0, 3, KEY_LEFTALT), /* Orange Alt Button */
+	KEY(2, 0, KEY_7), 		  KEY(0, 2, KEY_8), KEY(1, 0, KEY_9),   KEY(0, 3, KEY_MENU), /* Orange Alt Button */
 	KEY(0, 4, KEY_4), 		  KEY(0, 5, KEY_5), KEY(0, 6, KEY_6),   KEY(0, 7, KEY_LEFTSHIFT),
 	KEY(0, 0, KEY_1), 		  KEY(5, 4, KEY_2), KEY(1, 1, KEY_3),   KEY(1, 2, KEY_ENTER), 
 	KEY(1, 3, KEY_BACKSPACE), KEY(1, 4, KEY_0), KEY(1, 5, KEY_DOT),
 
 	/* Letter Keys */
-	KEY(1, 6, KEY_LEFTCTRL), KEY(1, 7, KEY_A), KEY(5, 5, KEY_B), KEY(2, 1, KEY_C), KEY(2, 2, KEY_MENU), /* Func button */ 
+	KEY(1, 6, KEY_LEFTCTRL), KEY(1, 7, KEY_A), KEY(5, 5, KEY_B), KEY(2, 1, KEY_C), KEY(2, 2, KEY_FN), /* Func button */ 
 	KEY(2, 3, KEY_D), 		 KEY(2, 4, KEY_E), KEY(2, 5, KEY_F), KEY(2, 6, KEY_G), KEY(2, 7, KEY_H),
 	KEY(3, 0, KEY_I),		 KEY(3, 1, KEY_J), KEY(3, 2, KEY_K), KEY(3, 3, KEY_L), KEY(3, 4, KEY_M),
 	KEY(3, 5, KEY_N),		 KEY(3, 6, KEY_O), KEY(3, 7, KEY_P), KEY(4, 0, KEY_Q), KEY(4, 1, KEY_R), 
 	KEY(4, 2, KEY_S),		 KEY(4, 3, KEY_T), KEY(4, 4, KEY_U), KEY(4, 5, KEY_V), KEY(4, 6, KEY_W),
-	KEY(4, 7, KEY_SLEEP),	 KEY(5, 0, KEY_X), KEY(5, 1, KEY_Y), KEY(5, 2, KEY_Z)
-	/* for Backlight btn*/
+	KEY(4, 7, KEY_SPACE),	 KEY(5, 0, KEY_X), KEY(5, 1, KEY_Y), KEY(5, 2, KEY_Z)
+	/* KEY(4, 7) is Backlight button*/
+};
+
+static unsigned int mc3190_matrix_key_map_fn[] = {
+    /* Num Keys */
+    /* KEY(2, 0, KEY_7), */           KEY(0, 2, KEY_UP), /*   KEY(1, 0, KEY_9), */  /* KEY(0, 3, KEY_MENU), */
+    KEY(0, 4, KEY_LEFT),              KEY(0, 5, KEY_ENTER),   KEY(0, 6, KEY_RIGHT), /* KEY(0, 7, KEY_LEFTSHIFT), */
+    /* KEY(0, 0, KEY_1), */           KEY(5, 4, KEY_DOWN), /* KEY(1, 1, KEY_3), */  /* KEY(1, 2, KEY_ENTER), */ 
+    KEY(1, 3, KEY_SPACE),          /* KEY(1, 4, KEY_0), */ /* KEY(1, 5, KEY_DOT), */
+
+    /* Letter Keys */
+    KEY(1, 6, KEY_LEFTALT),           KEY(1, 7, KEY_F1),      KEY(5, 5, KEY_F2),       KEY(2, 1, KEY_F3),   /* KEY(2, 2, KEY_ALT), */ /* Func button */ 
+    KEY(2, 3, KEY_F4),                KEY(2, 4, KEY_F5),      KEY(2, 5, KEY_F6),       KEY(2, 6, KEY_F7),      KEY(2, 7, KEY_F8),
+    KEY(3, 0, KEY_F9),                KEY(3, 1, KEY_F10),     KEY(3, 2, KEY_F11),      KEY(3, 3, KEY_F12),     KEY(3, 4, KEY_F13),
+    KEY(3, 5, KEY_BRIGHTNESSUP),   /* KEY(3, 6, KEY_O),       KEY(3, 7, KEY_P),        KEY(4, 0, KEY_Q), */    KEY(4, 1, KEY_VOLUMEUP), 
+    KEY(4, 2, KEY_BRIGHTNESSDOWN), /* KEY(4, 3, KEY_T),       KEY(4, 4, KEY_U),        KEY(4, 5, KEY_V), */    KEY(4, 6, KEY_VOLUMEDOWN),
+    /* KEY(4, 7, KEY_SPACE),          KEY(5, 0, KEY_X),       KEY(5, 1, KEY_Y),        KEY(5, 2, KEY_Z) */
+    /* KEY(4, 7) is Backlight button*/
 };
 
 static struct pxa27x_keypad_platform_data mc3190_keypad_info = {
-	.matrix_key_rows	= 8,
-	.matrix_key_cols	= 8,
-	.matrix_key_map		= mc3190_matrix_key_map,
+	.matrix_key_rows		= 8,
+	.matrix_key_cols		= 8,
+	.matrix_key_map			= mc3190_matrix_key_map,
 	.matrix_key_map_size	= ARRAY_SIZE(mc3190_matrix_key_map),
+	.matrix_key_map_fn		= mc3190_matrix_key_map_fn,
+	.matrix_key_map_fn_size	= ARRAY_SIZE(mc3190_matrix_key_map_fn),
 
-	.enable_rotary0		= 1,
-	.rotary0_up_key		= KEY_UP,
-	.rotary0_down_key	= KEY_DOWN,
-
-	.debounce_interval	= 30,
+	.debounce_interval	 = 30,
 };
 
 static void __init mc3190_init_keypad(void)

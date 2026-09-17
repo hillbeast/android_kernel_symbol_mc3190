@@ -109,10 +109,12 @@ struct pxa27x_keypad {
 	int irq;
 
 	unsigned short keycodes[MAX_KEYPAD_KEYS];
+	unsigned short keycodes_fn[MAX_MATRIX_KEY_NUM];
 	int rotary_rel_code[2];
 
 	/* state row bits of each column scan */
 	uint32_t matrix_key_state[MAX_MATRIX_KEY_COLS];
+	uint32_t matrix_key_fn_active[MAX_MATRIX_KEY_COLS];
 	uint32_t direct_key_state;
 
 	unsigned int direct_key_mask;
@@ -136,6 +138,20 @@ static void pxa27x_keypad_build_keycode(struct pxa27x_keypad *keypad)
 		keypad->keycodes[scancode] = keycode;
 		__set_bit(keycode, input_dev->keybit);
 	}
+
+#ifdef CONFIG_KEYBOARD_PXA27x_FN
+	for (i = 0; i < pdata->matrix_key_map_fn_size; i++) {
+		unsigned int key = pdata->matrix_key_map_fn[i];
+		unsigned int row = KEY_ROW(key);
+		unsigned int col = KEY_COL(key);
+		unsigned int scancode = MATRIX_SCAN_CODE(row, col,
+							 MATRIX_ROW_SHIFT);
+
+		keycode = KEY_VAL(key);
+		keypad->keycodes_fn[scancode] = keycode;
+		__set_bit(keycode, input_dev->keybit);
+	}
+#endif // CONFIG_KEYBOARD_PXA27x_FN
 
 	for (i = 0; i < pdata->direct_key_num; i++) {
 		keycode = pdata->direct_key_map[i];
@@ -223,7 +239,28 @@ static void pxa27x_keypad_scan_matrix(struct pxa27x_keypad *keypad)
 		new_state[6] = kpasmkp3 & KPASMKP_MKC_MASK;
 		new_state[7] = (kpasmkp3 >> 16) & KPASMKP_MKC_MASK;
 	}
+
+#ifdef CONFIG_KEYBOARD_PXA27x_FN
+#ifndef CONFIG_KEYBOARD_PXA27x_FN_ROW
+	#define FN_ROW	2
+#else
+	#define FN_ROW	CONFIG_KEYBOARD_PXA27x_FN_ROW
+#endif
+
+#ifndef CONFIG_KEYBOARD_PXA27x_FN_COL
+	#define FN_COL	2
+#else
+	#define FN_COL	2
+#endif
+#endif // CONFIG_KEYBOARD_PXA27x_FN
+
+
 scan:
+	{
+#ifdef CONFIG_KEYBOARD_PXA27x_FN
+	bool fn_held = !!(new_state[FN_COL] & (1 << FN_ROW));
+#endif // CONFIG_KEYBOARD_PXA27x_FN
+
 	for (col = 0; col < pdata->matrix_key_cols; col++) {
 		uint32_t bits_changed;
 		int code;
@@ -233,14 +270,46 @@ scan:
 			continue;
 
 		for (row = 0; row < pdata->matrix_key_rows; row++) {
+#ifdef CONFIG_KEYBOARD_PXA27x_FN
+			bool pressed;
+			unsigned short keycode;
+#endif // CONFIG_KEYBOARD_PXA27x_FN
+
 			if ((bits_changed & (1 << row)) == 0)
 				continue;
 
 			code = MATRIX_SCAN_CODE(row, col, MATRIX_ROW_SHIFT);
+
+#ifdef CONFIG_KEYBOARD_PXA27x_FN
+			pressed = !!(new_state[col] & (1 << row));
+
+			if (pressed) {
+				/* decide once, at press time; remember it
+				 * for the matching release */
+				if (fn_held && keypad->keycodes_fn[code]) {
+					keycode = keypad->keycodes_fn[code];
+					keypad->matrix_key_fn_active[col] |= (1 << row);
+				} else {
+					keycode = keypad->keycodes[code];
+					keypad->matrix_key_fn_active[col] &= ~(1 << row);
+				}
+			} else {
+				/* release: use whichever table the press used */
+				if (keypad->matrix_key_fn_active[col] & (1 << row))
+					keycode = keypad->keycodes_fn[code];
+				else
+					keycode = keypad->keycodes[code];
+			}
+			input_event(input_dev, EV_MSC, MSC_SCAN, code);
+			input_report_key(input_dev, keycode, pressed);
+
+#else
 			input_event(input_dev, EV_MSC, MSC_SCAN, code);
 			input_report_key(input_dev, keypad->keycodes[code],
 					 new_state[col] & (1 << row));
+#endif // CONFIG_KEYBOARD_PXA27x_FN
 		}
+	}
 	}
 	input_sync(input_dev);
 	memcpy(keypad->matrix_key_state, new_state, sizeof(new_state));
