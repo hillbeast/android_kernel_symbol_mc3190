@@ -435,4 +435,10 @@ config KEYPAD_CYPRESS_TOUCH
 	  To compile this driver as a module, choose M here: the
 	  module will be called cypress-touchkey.
 
+config KEY_MC3190_POWER
+	bool "Symbol MC3190 Power Key support"
+	depends on MACH_MC3190
+	help
+	  Say Y here if you want to use the Symbol MC3190 power key.
+
 endif
