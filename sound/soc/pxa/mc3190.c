@@ -52,10 +52,10 @@ static int mc3190_spk_amp_event(struct snd_soc_dapm_widget *w,
 	if (SND_SOC_DAPM_EVENT_ON(event)) {
 		snd_soc_update_bits(codec, 0x1c, 0x3f00, 0x1c00);
 		snd_soc_update_bits(codec, 0x1e, 0x1c00, 0x0800);
-		mc3190_cpld_write(MC3190_CPLD_AUDIOAMP_ON_BIT, MC3190_CPLD_REG_AUDIO);
+		mc3190_cpld_regon(MC3190_CPLD_AUDIOAMP_BIT, MC3190_CPLD_REG_AUDIO);
 		msleep(5);
 	} else {
-		mc3190_cpld_write(MC3190_CPLD_AUDIOAMP_ON_BIT, MC3190_CPLD_REG_AUDIO + 2);
+		mc3190_cpld_regoff(MC3190_CPLD_AUDIOAMP_BIT, MC3190_CPLD_REG_AUDIO);
 	}
 	
 	return 0;
