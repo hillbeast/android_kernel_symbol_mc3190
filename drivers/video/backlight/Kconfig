@@ -109,6 +109,14 @@ config LCD_S6E63M0
 	  If you have an S6E63M0 LCD Panel, say Y to enable its
 	  LCD control driver.
 
+config LCD_MC3190
+	tristate "Symbol MC3190 LCD Driver"
+	depends on MACH_MC3190 && SPI
+	default y
+	help
+	  If you have a Symbol MC3190 device, say Y to enable its
+	  LCD panel driver.
+
 endif # LCD_CLASS_DEVICE
 
 #

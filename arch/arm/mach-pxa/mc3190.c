@@ -286,24 +286,20 @@ static struct platform_device mc3190_backlight_device = {
 	},
 };
 
-static struct pxa2xx_spi_chip mc3190_lcd_chip_info = {
-	.tx_threshold	= 1,
-	.rx_threshold	= 1,
-	.dma_burst_size	= 1,
-	.timeout	= 200,
-	.gpio_cs	= -1,
+static struct spi_board_info mc3190_lcd_spi_board_info[] __initdata = {
+	{
+		.modalias		= "mc3190-lcd-panel",
+		.bus_num		= 3,
+		.chip_select	= 0,
+		.max_speed_hz	= 1000000,
+		.mode			= SPI_MODE_0,
+	},
 };
 
-static struct spi_board_info mc3190_lcd_spi_board_info[] __initdata = {
-    {
-        .modalias        = "mc3190_lcd",
-        .max_speed_hz    = 1625000,
-        .bus_num         = 3,
-        .chip_select     = 0,
-        .mode            = SPI_MODE_3,
-		.controller_data = &mc3190_lcd_chip_info,
-    },
-};
+static void mc3190_lcd_power(int on, struct fb_var_screeninfo *var)
+{
+	mc3190_panel_set_power(on);
+}
 
 static struct pxafb_mode_info mc3190_lcd_mode = {
 	.pixclock	= 115384,
@@ -311,12 +307,12 @@ static struct pxafb_mode_info mc3190_lcd_mode = {
 	.yres		= 320,
 	.bpp		= 16,
 
-	.left_margin	= 27,
-	.right_margin	= 7,
-	.upper_margin	= 7,
+	.left_margin	= 9,
+	.right_margin	= 9,
+	.upper_margin	= 5,
 	.lower_margin	= 8,
 
-	.hsync_len	= 6,
+	.hsync_len	= 9,
 	.vsync_len	= 1,
 };
 
@@ -324,6 +320,7 @@ static struct pxafb_mach_info mc3190_lcd_info = {
 	.modes			= &mc3190_lcd_mode,
 	.num_modes		= 1,
 	.lcd_conn		= LCD_COLOR_TFT_16BPP | LCD_PCLK_EDGE_FALL,
+	.pxafb_lcd_power = mc3190_lcd_power,
 };
 
 static void __init mc3190_init_lcd(void)

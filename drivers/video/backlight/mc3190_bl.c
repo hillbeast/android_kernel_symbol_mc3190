@@ -27,6 +27,18 @@
 #include <linux/slab.h>
 #include <linux/mc3190.h>
 
+static struct backlight_device *mc3190_bl_dev;
+
+void mc3190_bl_set_power(int on)
+{
+	if (!mc3190_bl_dev)
+		return;
+
+	mc3190_bl_dev->props.power = on ? FB_BLANK_UNBLANK : FB_BLANK_POWERDOWN;
+	backlight_update_status(mc3190_bl_dev);
+}
+EXPORT_SYMBOL_GPL(mc3190_bl_set_power);
+
 static void mc3190_bl_power_on(struct mc3190_bl_data *d)
 {
 	// The device is a blackbox so the following code is just imitating what Windows CE does
@@ -92,7 +104,6 @@ static int mc3190_bl_get_brightness(struct backlight_device *bl)
 }
 
 static const struct backlight_ops mc3190_bl_ops = {
-	.options	= BL_CORE_SUSPENDRESUME,
 	.update_status	= mc3190_bl_update_status,
 	.get_brightness	= mc3190_bl_get_brightness,
 };
@@ -136,6 +147,7 @@ static int __devinit mc3190_bl_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, bl);
+	mc3190_bl_dev = bl;
 
 	bl->props.brightness = pdata->dft_brightness;
 	backlight_update_status(bl);
@@ -157,6 +169,7 @@ static int __devexit mc3190_bl_remove(struct platform_device *pdev)
 	struct backlight_device *bl = platform_get_drvdata(pdev);
 	struct mc3190_bl_data *d = bl_get_data(bl);
 
+	mc3190_bl_dev = NULL;
 	backlight_device_unregister(bl);
 
 	mc3190_bl_power_off(d);

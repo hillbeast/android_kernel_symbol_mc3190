@@ -18,17 +18,25 @@
 #define EXT_GPIO(x)		(128 + (x))
 
 struct mc3190_bl_platform_data {
-	int		pwm_id;		/* Linux PWM channel number: 1 */
-	unsigned long	pwm_period_ns;	/* full-scale PWM period, ns: 23077 */
-	int		max_brightness;	/* matches WinCE PWMPeriod: 99 */
-	int		dft_brightness;	/* your chosen default, e.g. 60 */
+	int	pwm_id;
+	unsigned long pwm_period_ns;
+	int	max_brightness;
+	int	dft_brightness;
 };
 
 struct mc3190_bl_data {
-	struct pwm_device	*pwm;
+	struct pwm_device *pwm;
 	struct mc3190_bl_platform_data *pdata;
-	int			powered;	/* rail currently enabled? */
+	int	powered;
 };
+
+/*
+ * Various hardware functions
+ */
+
+extern void mc3190_panel_set_power(int on);
+extern void mc3190_bl_set_power(int on);
+
 
 /*
  * CPLD Definitions
@@ -45,9 +53,9 @@ struct mc3190_bl_data {
 
 #define MC3190_CPLD_LCD_LCD_BIT_0   (1 << 0)
 #define MC3190_CPLD_LCD_LCD_BIT_1   (1 << 1)
+#define MC3190_CPLD_LCD_EN_BIT      (1 << 0)
 #define MC3190_CPLD_LCD_READY_BIT   (1 << 2)
 #define MC3190_CPLD_LCD_BL_BIT      (1 << 3)
-#define MC3190_CPLD_LCD_LCD_RB_BIT  (1 << 4)
 
 #define MC3190_CPLD_USB_CONNECTED_BIT	(1 << 5)
 
@@ -58,6 +66,9 @@ extern u16 mc3190_cpld_read(unsigned int reg);
 extern void mc3190_cpld_regon(u16 val, unsigned int reg);
 extern void mc3190_cpld_regoff(u16 val, unsigned int reg);
 extern void mc3190_cpld_rmw(u16 ormask, u16 andmask, unsigned int reg);
+extern int mc3190_cpld_wait_bit(unsigned int reg, u16 bit, bool set, unsigned int timeout_ms);
+extern int mc3190_cpld_regon_wait(u16 val, unsigned int reg, u16 wait_bit, unsigned int timeout_ms);
+extern int mc3190_cpld_regoff_wait(u16 val, unsigned int reg, u16 wait_bit, unsigned int timeout_ms);
 
 /*
  * AVR Microcontroller MFD Device

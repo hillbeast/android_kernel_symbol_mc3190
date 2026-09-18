@@ -17,6 +17,8 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 */
 
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/io.h>
@@ -97,9 +99,47 @@ void mc3190_cpld_rmw(u16 ormask, u16 andmask, unsigned int reg)
 }
 EXPORT_SYMBOL_GPL(mc3190_cpld_rmw);
 
+int mc3190_cpld_wait_bit(unsigned int reg, u16 bit, bool set, unsigned int timeout_ms)
+{
+    unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
+
+    do {
+        u16 val = mc3190_cpld_read(reg);
+
+        if (!!(val & bit) == set)
+            return 0;
+
+        msleep(1);
+    } while (time_before(jiffies, deadline));
+
+#ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
+    pr_warn("%s: timed out waiting for bit 0x%04x on reg 0x%02x to %s\n",
+        __func__, bit, reg, set ? "set" : "clear");
+#endif
+    return -ETIMEDOUT;
+}
+EXPORT_SYMBOL_GPL(mc3190_cpld_wait_bit);
+
+int mc3190_cpld_regon_wait(u16 val, unsigned int reg, u16 wait_bit, unsigned int timeout_ms)
+{
+    mc3190_cpld_regon(val, reg);
+    return mc3190_cpld_wait_bit(reg, wait_bit, true, timeout_ms);
+}
+EXPORT_SYMBOL_GPL(mc3190_cpld_regon_wait);
+
+int mc3190_cpld_regoff_wait(u16 val, unsigned int reg, u16 wait_bit, unsigned int timeout_ms)
+{
+    mc3190_cpld_regoff(val, reg);
+    return mc3190_cpld_wait_bit(reg, wait_bit, false, timeout_ms);
+}
+EXPORT_SYMBOL_GPL(mc3190_cpld_regoff_wait);
+
 static int __devinit mc3190_cpld_probe(struct platform_device *pdev)
 {
     struct resource *res;
+    u16 ret;
+    u16 majorVersion;
+    u16 minorVersion;
 
     res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
     if (!res) {
@@ -118,11 +158,6 @@ static int __devinit mc3190_cpld_probe(struct platform_device *pdev)
         release_mem_region(res->start, resource_size(res));
         return -ENOMEM;
     }
-
-
-    u16 ret;
-    u16 majorVersion;
-    u16 minorVersion;
 
     ret = mc3190_cpld_read(MC3190_CPLD_REG_VERSION);
     majorVersion = (ret & 0xFF) >> 5;
