@@ -19,6 +19,7 @@
 #include <linux/device.h>
 #include <linux/clk.h>
 #include <linux/i2c.h>
+#include <linux/workqueue.h>
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/pcm_params.h>
@@ -31,18 +32,10 @@
 #include "pxa2xx-ac97.h"
 #include "pxa-ssp.h"
 
-/*
- * There is a physical switch SW15 on the board which changes the MCLK
- * for the WM9713 between the standard AC97 master clock and the
- * output of the CLK_POUT signal from the PXA.
- */
-static int clk_pout;
-module_param(clk_pout, int, 0);
-MODULE_PARM_DESC(clk_pout, "Use CLK_POUT as WM9713 MCLK (SW15 on board).");
-
 static struct clk *pout;
 
 static struct snd_soc_card mc3190;
+static struct snd_soc_codec *mc3190_codec;
 
 static int mc3190_spk_amp_event(struct snd_soc_dapm_widget *w,
 				struct snd_kcontrol *kcontrol, int event)
@@ -92,12 +85,62 @@ static const struct snd_soc_dapm_route audio_map[] = {
 	{ "Multiactor", NULL, "SPKR" },
 };
 
+static int mc3190_set_named_control(struct snd_card *card, const char *name, int value)
+{
+    struct snd_kcontrol *kctl;
+    struct snd_ctl_elem_info info;
+    struct snd_ctl_elem_value uctl;
+    int found = 0;
+
+    list_for_each_entry(kctl, &card->controls, list) {
+        if (!strncmp(kctl->id.name, name, sizeof(kctl->id.name))) {
+            found = 1;
+            break;
+        }
+    }
+    if (!found) {
+        printk(KERN_ERR "mc3190: control '%s' not found\n", name);
+        return -ENOENT;
+    }
+
+    memset(&info, 0, sizeof(info));
+    info.id = kctl->id;
+    if (kctl->info(kctl, &info) < 0) {
+        printk(KERN_ERR "mc3190: could not get info for '%s'\n", name);
+        return -EINVAL;
+    }
+
+    memset(&uctl, 0, sizeof(uctl));
+    uctl.id = kctl->id;
+
+    switch (info.type) {
+    case SNDRV_CTL_ELEM_TYPE_BOOLEAN:
+    case SNDRV_CTL_ELEM_TYPE_INTEGER:
+        uctl.value.integer.value[0] = value;
+        break;
+    case SNDRV_CTL_ELEM_TYPE_ENUMERATED:
+        uctl.value.enumerated.item[0] = value;
+        break;
+    default:
+        printk(KERN_ERR "mc3190: unsupported control type for '%s'\n", name);
+        return -EINVAL;
+    }
+
+    return kctl->put(kctl, &uctl);
+}
+
+static void mc3190_audio_route_work(struct work_struct *work)
+{
+    struct snd_card *card = mc3190_codec->card;
+
+	mc3190_set_named_control(card, "Speaker Mixer PCM Playback Switch", 1);
+    mc3190_set_named_control(card, "Left Speaker Out Mux", 3);
+    mc3190_set_named_control(card, "Right Speaker Out Mux", 3);
+}
+static DECLARE_DELAYED_WORK(mc3190_audio_route_dwork, mc3190_audio_route_work);
+
 static int mc3190_wm9713_init(struct snd_soc_codec *codec)
 {
-	if (clk_pout)
-		snd_soc_dai_set_pll(&codec->dai[0], 0, 0,
-				    clk_get_rate(pout), 0);
-
 	snd_soc_dapm_new_controls(codec, mc3190_dapm_widgets,
 				  ARRAY_SIZE(mc3190_dapm_widgets));
 
@@ -109,6 +152,10 @@ static int mc3190_wm9713_init(struct snd_soc_codec *codec)
 	snd_soc_dapm_enable_pin(codec, "Multiactor"); 
 
 	snd_soc_dapm_sync(codec);
+
+	mc3190_codec = codec;
+    schedule_delayed_work(&mc3190_audio_route_dwork, msecs_to_jiffies(100));
+
 	return 0;
 }
 
@@ -155,12 +202,8 @@ static int mc3190_voice_hw_params(struct snd_pcm_substream *substream,
 	if (ret < 0)
 		return ret;
 
-	if (clk_pout)
-		ret = snd_soc_dai_set_clkdiv(codec_dai, WM9713_PCMCLK_PLL_DIV,
-					     WM9713_PCMDIV(wm9713_div));
-	else
-		ret = snd_soc_dai_set_clkdiv(codec_dai, WM9713_PCMCLK_DIV,
-					     WM9713_PCMDIV(wm9713_div));
+	ret = snd_soc_dai_set_clkdiv(codec_dai, WM9713_PCMCLK_DIV,
+						WM9713_PCMDIV(wm9713_div));
 	if (ret < 0)
 		return ret;
 
@@ -201,62 +244,23 @@ static struct snd_soc_dai_link mc3190_dai[] = {
 
 static int mc3190_probe(struct platform_device *pdev)
 {
-	int ret;
-
-	if (clk_pout) {
-		pout = clk_get(NULL, "CLK_POUT");
-		if (IS_ERR(pout)) {
-			dev_err(&pdev->dev, "Unable to obtain CLK_POUT: %ld\n",
-				PTR_ERR(pout));
-			return PTR_ERR(pout);
-		}
-
-		ret = clk_enable(pout);
-		if (ret != 0) {
-			dev_err(&pdev->dev, "Unable to enable CLK_POUT: %d\n",
-				ret);
-			clk_put(pout);
-			return ret;
-		}
-
-		dev_dbg(&pdev->dev, "MCLK enabled at %luHz\n",
-			clk_get_rate(pout));
-	}
-
 	return 0;
 }
 
 static int mc3190_remove(struct platform_device *pdev)
 {
-	if (clk_pout) {
-		clk_disable(pout);
-		clk_put(pout);
-	}
-
 	return 0;
 }
 
 static int mc3190_suspend_post(struct platform_device *pdev,
 				 pm_message_t state)
 {
-	if (clk_pout)
-		clk_disable(pout);
-
 	return 0;
 }
 
 static int mc3190_resume_pre(struct platform_device *pdev)
 {
-	int ret = 0;
-
-	if (clk_pout) {
-		ret = clk_enable(pout);
-		if (ret != 0)
-			dev_err(&pdev->dev, "Unable to enable CLK_POUT: %d\n",
-				ret);
-	}
-
-	return ret;
+	return 0;
 }
 
 static struct snd_soc_card mc3190 = {
