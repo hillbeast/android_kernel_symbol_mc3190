@@ -611,7 +611,7 @@ static void __init mc3190_init(void)
 
     pxa_set_udc_info(&mc3190_udc_info);
 
-//	mc3190_init_ohci();
+	mc3190_init_ohci();
 }
 
 MACHINE_START(MC3190, "Symbol MC3190")
