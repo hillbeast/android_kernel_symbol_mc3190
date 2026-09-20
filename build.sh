@@ -22,8 +22,17 @@ if test -f "arch/arm/boot/zImage"; then
 	OUTFILE=$VERSION-zImage
     echo "  OBJCOPY $OUTFILE"
 	cp arch/arm/boot/zImage ./$OUTFILE
-    echo "  CONFIG  config-$VERSION"
-	cat .config | grep -v "is not set" | grep -v "^#" > ./config-$VERSION
+
+	cat .config | grep -v "is not set" | grep -v "^#" > ./.config-new
+	if [ ! -f ".config-old" ]; then
+		touch .config-old
+	fi
+
+	if ! cmp -s ".config-new" ".config-old"; then
+		echo "  CONFIG  config-$VERSION"
+		cp .config-new ./config-$VERSION
+		cp .config-new .config-old
+	fi
 
 else
 	echo "Make failed to produce zImage"
