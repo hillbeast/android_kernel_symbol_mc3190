@@ -61,6 +61,14 @@
 #define PWRMICRO_ACK_OUT_GPIO 17
 #define PWRMICRO_RESET_GPIO   16
 
+#ifdef CONFIG_MFD_MC3190_PM_DEBUG
+#define printk_pmdbg(dev, format, arg...)		\
+	dev_printk(KERN_INFO , dev , format , ## arg)
+#else
+#define printk_pmdbg(dev, format, arg...)		\
+	({ if (0) dev_printk(KERN_DEBUG, dev, format, ##arg); 0; })
+#endif // CONFIG_MFD_MC3190_PM_DEBUG
+
 /*
  * AVR Opcodes:
  * ============
@@ -199,7 +207,7 @@ static void mc3190_request_information(struct mc3190_pwrmicro *priv, u8 rx_tag)
 						priv->have_outstanding_request = true;
 						priv->outstanding_request_tag = i;
 						priv->outstanding_request_word = (i << 24) | (j << 16);
-						dev_dbg(priv->dev, "cmd10 tag 0x%02x needs update: outstanding_request_word=0x%08x\n",
+						printk_pmdbg(priv->dev, "cmd10 tag 0x%02x needs update: outstanding_request_word=0x%08x\n",
 											j, priv->outstanding_request_word);
 						return;
 					}
@@ -211,7 +219,7 @@ static void mc3190_request_information(struct mc3190_pwrmicro *priv, u8 rx_tag)
 			priv->have_outstanding_request = true;
 			priv->outstanding_request_tag = i;
 			priv->outstanding_request_word = i << 24;
-			dev_dbg(priv->dev, "tag 0x%02x needs update: outstanding_request_word=0x%08x\n",
+			printk_pmdbg(priv->dev, "tag 0x%02x needs update: outstanding_request_word=0x%08x\n",
 								i, priv->outstanding_request_word);
 			return;
 		}
@@ -261,7 +269,7 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 			        payload == priv->last_cmd_payload;
 
 	if (priv->have_outstanding_request && tag == priv->outstanding_request_tag) {
-		dev_dbg(priv->dev, "outstanding request 0x%02x answered: raw_tag=0x%02x payload=0x%06x\n",
+		printk_pmdbg(priv->dev, "outstanding request 0x%02x answered: raw_tag=0x%02x payload=0x%06x\n",
 			 tag, raw_tag, payload);
 		priv->have_outstanding_request = false;
 	}
@@ -292,14 +300,10 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 	switch (tag) {
 	case MC3190_TAG_TOUCH_DATA: {
 		u16 y = rx_word & 0xFFF;
-		u16 x = (rx_word >> 0xc & 0xff0 | rx_word & 0xf000) >> 4;
+		u16 x = (((rx_word >> 0xc) & 0xff0) | (rx_word & 0xf000)) >> 4;
 
 
-#ifdef CONFIG_MFD_MC3190_PM_DEBUG
-		dev_info(priv->dev, "touch data: raw=0x%08x x=%u y=%u\n", rx_word, x, y);
-#else
-		dev_dbg(priv->dev, "touch data: raw=0x%08x x=%u y=%u\n", rx_word, x, y);
-#endif
+		printk_pmdbg(priv->dev, "touch data: raw=0x%08x x=%u y=%u\n", rx_word, x, y);
 #ifdef CONFIG_TOUCHSCREEN_MC3190
 		if (priv->touch_dev)
 			mc3190_touch_report(priv->touch_dev, x, y, PWRMICRO_TOUCH_DOWN);
@@ -313,12 +317,12 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 
 	case MC3190_TAG_BATT_CAP_EVENT:
 		if (!priv->ready_for_gated_tags) {
-			dev_dbg(priv->dev, "tag 0x07 received but not ready yet - ignoring\n");
+			printk_pmdbg(priv->dev, "tag 0x07 received but not ready yet - ignoring\n");
 			break;
 		}
 
 		pwrmicro_reset_always_needs_updates(priv);
-		dev_dbg(priv->dev, "Battery Capacity Event (rx_word=0x%08x)\n", rx_word);
+		printk_pmdbg(priv->dev, "Battery Capacity Event (rx_word=0x%08x)\n", rx_word);
 		priv->in_state_machine = true;
 		priv->state_machine = PWRMICRO_STATE_BATTERY;
 
@@ -339,7 +343,7 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 
 	case MC3190_TAG_PWR_EVENT_TBC:
 	case MC3190_TAG_PWR_EVENT:
-		dev_dbg(priv->dev, "Power Event (rx_word=0x%08x)\n", rx_word);
+		printk_pmdbg(priv->dev, "Power Event (rx_word=0x%08x)\n", rx_word);
 
 		mc3190_store_register_data(priv, tag, payload);
 #ifdef CONFIG_MC3190_BATTERY
@@ -356,7 +360,7 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 		break;
 
 	case MC3190_TAG_VER:
-		dev_dbg(priv->dev, "Version Event (rx_word=0x%08x)\n", rx_word);
+		printk_pmdbg(priv->dev, "Version Event (rx_word=0x%08x)\n", rx_word);
 
 		priv->versionMajor = (payload >> 16);
 		priv->versionMinor = (payload >> 8);
@@ -371,7 +375,7 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 		break;
 
 	case MC3190_TAG_USERVER:
-		dev_dbg(priv->dev, "User Version Event (rx_word=0x%08x)\n", rx_word);
+		printk_pmdbg(priv->dev, "User Version Event (rx_word=0x%08x)\n", rx_word);
 
 		priv->versionUser = (payload >> 8);
 
@@ -389,11 +393,7 @@ static void mc3190_dispatch(struct mc3190_pwrmicro *priv, u32 rx_word)
 		break;
 
 	case MC3190_TAG_SYS_ACK:
-#ifdef CONFIG_MFD_MC3190_PM_DEBUG
-		dev_info(priv->dev, "ACK Tag (rx_word=0x%08x)\n", rx_word);
-#else
-		dev_dbg(priv->dev, "ACK Tag (rx_word=0x%08x)\n", rx_word);
-#endif
+		printk_pmdbg(priv->dev, "ACK Tag (rx_word=0x%08x)\n", rx_word);
 		if (priv->in_state_machine) {
 			switch (priv->state_machine) {
 			case PWRMICRO_STATE_TOUCH:
