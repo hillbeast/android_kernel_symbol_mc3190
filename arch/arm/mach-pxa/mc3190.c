@@ -31,6 +31,7 @@
 #include <mach/pxafb.h>
 #include <mach/pxa27x_keypad.h>
 #include <mach/udc.h>
+#include <plat/i2c.h>
 #include <plat/pxa3xx_nand.h>
 
 #include <linux/mc3190.h>
@@ -206,7 +207,7 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	GPIO30_GPIO,										// Red Notification LED
 	GPIO31_GPIO,										// Green Notification LED
 	GPIO36_GPIO,										// Unused AC97 pin. Could be used as GPIO
-	GPIO57_GPIO,
+	GPIO57_GPIO,										// Barcode Scanner (unsure on purpose)
 //	GPIO58_GPIO,						// Not set in Windows. Linux does not have definition for this GPIO
 	GPIO84_GPIO,						// USB_OTG (TBC)
 	GPIO97_GPIO,
@@ -610,6 +611,9 @@ static void __init mc3190_init(void)
 	spi_register_board_info(ARRAY_AND_SIZE(mc3190_lcd_spi_board_info));
 
     pxa_set_udc_info(&mc3190_udc_info);
+
+	pxa3xx_set_i2c_power_info(NULL);
+	pxa_set_i2c_info(NULL);
 
 	mc3190_init_ohci();
 }
