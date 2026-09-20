@@ -320,7 +320,7 @@ static struct pxafb_mode_info mc3190_lcd_mode = {
 static struct pxafb_mach_info mc3190_lcd_info = {
 	.modes			= &mc3190_lcd_mode,
 	.num_modes		= 1,
-	.lcd_conn		= LCD_COLOR_TFT_16BPP | LCD_PCLK_EDGE_FALL,
+	.lcd_conn		= LCD_COLOR_TFT_16BPP | LCD_PCLK_EDGE_RISE,
 	.pxafb_lcd_power = mc3190_lcd_power,
 };
 
