@@ -175,8 +175,11 @@ static int cistpl_funce_func(struct mmc_card *card, struct sdio_func *func,
 	 * version.
 	 */
 	vsn = func->card->cccr.sdio_vsn;
+#ifdef CONFIG_SYMBOL_JEDI
+	min_size = 28;			// Symbol Jedi SDIO module returns a non-standard 40 byte tuple
+#else
 	min_size = (vsn == SDIO_SDIO_REV_1_00) ? 28 : 42;
-
+#endif
 	if (size < min_size)
 		return -EINVAL;
 

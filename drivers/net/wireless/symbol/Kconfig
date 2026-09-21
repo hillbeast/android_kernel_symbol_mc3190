@@ -1,0 +1,7 @@
+config SYMBOL_JEDI
+	tristate "Motorola/Symbol Jedi Wireless support"
+	depends on MAC80211
+	---help---
+	  This driver supports Motorola/Symbol Jedi 802.11 wireless module.
+
+	  If unsure, say N.

@@ -12,10 +12,12 @@
  * published by the Free Software Foundation.
  */
 
+#include <linux/delay.h>
 #include <linux/gpio.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
+#include <linux/mmc/host.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
@@ -364,12 +366,30 @@ static int mc3190_mci_init(struct device *dev, irq_handler_t detect_int, void *d
 	return 0;
 }
 
-static struct pxamci_platform_data mc3190_mci_platform_data = {
-	.detect_delay_ms= 200,
-	.ocr_mask	= MMC_VDD_32_33|MMC_VDD_33_34,
-	.gpio_card_detect = EXT_GPIO(0),
-	.gpio_card_ro	= EXT_GPIO(2),
-	.gpio_power	= -1,
+static void mc3190_mci_setpower(struct device *dev, unsigned int vdd)
+{
+    if (vdd) {	// Power On
+        mc3190_cpld_regon(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+        mc3190_cpld_regon(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
+        msleep(50);
+
+        mc3190_cpld_regoff(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+        msleep(100);
+    } else {	// Power Off
+        mc3190_cpld_regoff(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+        mc3190_cpld_regoff(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
+        msleep(50);
+    }
+}
+
+static struct pxamci_platform_data mc3190_mci_platform_data = {		// WiFi
+	.detect_delay_ms	= 200,
+	.ocr_mask			= MMC_VDD_32_33|MMC_VDD_33_34,
+	.gpio_card_detect	= -1,
+	.gpio_card_ro		= -1,
+	.gpio_power			= -1,
+	.init				= mc3190_mci_init,
+    .setpower			= mc3190_mci_setpower,
 };
 
 static struct pxamci_platform_data mc3190_mci2_platform_data = {	// SD Card
@@ -383,7 +403,7 @@ static struct pxamci_platform_data mc3190_mci2_platform_data = {	// SD Card
 
 static void __init mc3190_init_mmc(void)
 {
-	pxa_set_mci_info(&mc3190_mci_platform_data);					// Unused?
+	pxa_set_mci_info(&mc3190_mci_platform_data);					// WiFi
 	pxa3xx_set_mci2_info(&mc3190_mci2_platform_data);				// SD Card
 }
 #else
