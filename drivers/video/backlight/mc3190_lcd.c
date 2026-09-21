@@ -242,8 +242,29 @@ static int __devinit mc3190_lcd_panel_probe(struct spi_device *spi)
 
 static int __devexit mc3190_lcd_panel_remove(struct spi_device *spi)
 {
+	mc3190_panel_power_off(spi);
 	mc3190_panel_spi = NULL;
 	return 0;
+}
+
+#if defined(CONFIG_PM)
+static int mc3190_lcd_panel_suspend(struct spi_device *spi, pm_message_t mesg)
+{
+	return mc3190_panel_power_off(spi);
+}
+
+static int mc3190_lcd_panel_resume(struct spi_device *spi)
+{
+	return mc3190_panel_power_on(spi);
+}
+#else
+#define mc3190_lcd_panel_suspend	NULL
+#define mc3190_lcd_panel_resume		NULL
+#endif
+
+static void mc3190_lcd_panel_shutdown(struct spi_device *spi)
+{
+	mc3190_panel_power_off(spi);
 }
 
 static struct spi_driver mc3190_lcd_panel_driver = {
@@ -253,6 +274,9 @@ static struct spi_driver mc3190_lcd_panel_driver = {
 	},
 	.probe	= mc3190_lcd_panel_probe,
 	.remove	= __devexit_p(mc3190_lcd_panel_remove),
+	.shutdown	= mc3190_lcd_panel_shutdown,
+	.suspend	= mc3190_lcd_panel_suspend,
+	.resume		= mc3190_lcd_panel_resume,
 };
 
 static int __init mc3190_lcd_panel_init(void)
