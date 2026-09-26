@@ -77,24 +77,59 @@ extern int mc3190_cpld_regoff_wait(u16 val, unsigned int reg, u16 wait_bit, unsi
 #define PWRMICRO_TOUCH_UP		false
 #define PWRMICRO_TOUCH_DOWN		true
 
+#define MC3190_TAG_TOUCH_WAKE		0x02			// Handles GetTchPnlSetup, SetTchPnlSetup, GetWakeupTimeout, GetTouchState, SetTouchState, SetWakeupTimeout // FIXME: Not implemented
 #define MC3190_TAG_TOUCH_DATA       0x03
 #define MC3190_TAG_SYS_ACK          0x04
-#define MC3190_TAG_LOW_BATT_WAKE    0x06 			// FIXME: TBC Function and data
-#define MC3190_TAG_BATT_CAP_EVENT   0x07			// FIXME: TBC Function and data
+#define MC3190_TAG_SET_LOWBATTWAKE	0x05 			// FIXME: Not implemented
+#define MC3190_TAG_LOW_BATT_WAKE    0x06 			// FIXME: Not implemented
+#define MC3190_TAG_BATT_CAP_EVENT   0x07
+#define MC3190_TAG_SET_BATTRESERVE	0x08			// FIXME: Not implemented
+#define MC3190_TAG_REBOOTCMD		0x09			// FIXME: Not implemented
+#define MC3190_TAG_GET_WAKE_CAUSE	0x0A			// FIXME: Not implemented
 #define MC3190_TAG_DRIVER_ID        0x0B			// FIXME: TBC Function and data
+#define MC3190_TAG_SUSPEND_WAKE		0x0C			// FIXME: Not implemented
+#define MC3190_TAG_SETREBOOTTIMES	0x0E			// FIXME: Not implemented
+#define MC3190_TAG_GETREBOOTTIMES	0x0F			// FIXME: Not implemented
 #define MC3190_TAG_PWR_EVENT_TBC    0x10			// FIXME: TBC Function and data
+	#define MC3190_TAG_PWR_BATTID_2			0x01	// 2nd Stage read // FIXME: Not implemented
+	#define MC3190_TAG_PWR_BATTID_1			0x04	// 1st Stage read // FIXME: Not implemented
 	#define MC3190_TAG_PWR_BATTMV			0x05
-	#define MC3190_TAG_PWR_EVENT_TBC_SUB06	0x06	// FIXME: TBC Function and data // Calibration for mV maybe?
-	#define MC3190_TAG_PWR_BATTPERCENT		0x07	// Battery percent, and a flag in upper byte (07 on charge, 00 off charge?)
-	#define MC3190_TAG_PWR_BATTTEMPERATURE	0x08	// FIXME: TBC Function and data // maybe temperature
-	#define MC3190_TAG_PWR_EVENT_TBC_SUB09	0x09	// FIXME: TBC Function and data // 
-	#define MC3190_TAG_PWR_EVENT_TBC_SUB14	0x14	// FIXME: TBC Function and data
+	#define MC3190_TAG_PWR_BATTCURRENT		0x06	// FIXME: AVR responds to this request with a 0x1005 response.
+	#define MC3190_TAG_PWR_BATTPERCENT		0x07
+	#define MC3190_TAG_PWR_BATTTEMPERATURE	0x08
+	#define MC3190_TAG_PWR_BACKUPBATTVOLT	0x09
+	#define MC3190_TAG_PWR_AGGREGATECHRG_2	0x0A	// 2nd Stage read // FIXME: Not implemented
+	#define MC3190_TAG_PWR_AGGREGATECHRG_1	0x0B	// 1st Stage read // FIXME: Not implemented
+	#define MC3190_TAG_PWR_BATTRATEDCAP		0x0D
+	#define MC3190_TAG_PWR_BATTMFGDATE_1	0x0E	// 1st Stage read // FIXME: Not implemented
+	#define MC3190_TAG_PWR_BATTMFGDATE_2	0x0F	// 2nd Stage read // FIXME: Not implemented
+	#define MC3190_TAG_PWR_BATTPARTNUM_2	0x10	// 2nd Stage read // FIXME: Not implemented
+	#define MC3190_TAG_PWR_BATTPARTNUM_1	0x11	// 1st Stage read // FIXME: Not implemented
+	#define MC3190_TAG_PWR_BATTINSTVOLT		0x12	// FIXME: Not implemented
+	#define MC3190_TAG_PWR_BATTINSTCURRENT	0x13
+	#define MC3190_TAG_PWR_BATTTYPE			0x14	// FIXME: Not implemented
+
+	#define MC3190_TAG_PWR_MAXTAGS			MC3190_TAG_PWR_BATTTYPE
 	
-#define MC3190_TAG_PWR_EVENT        0x11			// FIXME: TBC Function and data
-#define MC3190_TAG_READ_EEPROM      0x14			// FIXME: TBC Function and data
-#define MC3190_TAG_VER              0x20
+#define MC3190_TAG_PWR_EVENT        0x11			// Charge status (0x8000) and battery level (0xff = unknown, 0x64 = max)
+#define MC3190_TAG_OPEN_EEPROM		0x12			// Has second stage tag of 0x12010000 for open, 0x12020000 for close // FIXME: Not implemented
+#define MC3190_TAG_READ_EEPROM      0x14			// FIXME: Not implemented
+#define MC3190_TAG_SETTOUCHCFG2		0x15			// FIXME: Not implemented
+#define MC3190_TAG_SETLED1			0x16			// FIXME: Not implemented
+#define MC3190_TAG_SETLED2			0x17			// FIXME: Not implemented
+#define MC3190_TAG_IEEE1725LIMITS   0x19			// FIXME: Not implemented
+#define MC3190_TAG_IEEE1725DISABLE	0x1A			// FIXME: Not implemented
+#define MC3190_TAG_SETBATTFIRSTUSE	0x1B			// FIXME: Not implemented
+#define MC3190_TAG_SETHEALTHBYTE	0x1C			// FIXME: Not implemented
+#define MC3190_TAG_SETUSBCHRGLIMIT	0x1D			// FIXME: Not implemented
+#define MC3190_TAG_GETUSBCHRGLIMIT	0x1E			// FIXME: Not implemented
+#define MC3190_TAG_SENDGIFTBATTCMD	0x1F			// FIXME: Not implemented
+#define MC3190_TAG_VER              0x20			// GetTermType
 #define MC3190_TAG_USERVER          0x21
-#define MC3190_TAG_HEALTH_BYTE      0x23			// FIXME: TBC Function and data
+#define MC3190_TAG_BATTFIRSTUSEDATE	0x22			// FIXME: Not implemented
+#define MC3190_TAG_HEALTH_BYTE      0x23			// FIXME: Not implemented
+#define MC3190_TAG_SETUSBCHRGSTATE	0x24			// FIXME: Not implemented
+#define MC3190_TAG_GETFLASHBYTE		0x2A			// FIXME: Not implemented
 #define MC3190_TAG_CMD_ERR          0x3F			// FIXME: TBC Function and data
 
 
@@ -102,7 +137,7 @@ struct avr_register {
 	u8 data[3];
 	bool is_valid_register;
 	bool needs_update;
-	bool always_needs_update;
+	bool oneshot_read;
 	u8 needed_initiator;
 	u8 alternate_initiator;
 };
@@ -141,7 +176,7 @@ struct mc3190_pwrmicro {
 	u32  outstanding_request_word;
 
 	struct avr_register register_data[MC3190_TAG_CMD_ERR + 1];
-	struct avr_register cmd10_subdata[MC3190_TAG_PWR_EVENT_TBC_SUB14 + 1];
+	struct avr_register cmd10_subdata[MC3190_TAG_PWR_MAXTAGS + 1];
 
 	u8 versionMajor;
 	u8 versionMinor;
@@ -153,9 +188,13 @@ void mc3190_set_touch_dev(struct mc3190_pwrmicro *core, struct mc3190_touch *tou
 void mc3190_touch_report(struct mc3190_touch *touch, u16 x, u16 y, bool touchstate);
 
 void mc3190_set_battery_psy(struct mc3190_pwrmicro *priv, struct power_supply *psy);
+int mc3190_get_battery_current(struct mc3190_pwrmicro *priv);
 int mc3190_get_battery_voltage(struct mc3190_pwrmicro *priv);
 int mc3190_get_battery_capacity(struct mc3190_pwrmicro *priv);
 int mc3190_get_battery_status(struct mc3190_pwrmicro *priv);
+int mc3190_get_battery_temperature(struct mc3190_pwrmicro *priv);
+int mc3190_get_battery_rated_capacity(struct mc3190_pwrmicro *priv);
+int mc3190_get_backup_battery_voltage(struct mc3190_pwrmicro *priv);
 bool mc3190_is_battery_present(struct mc3190_pwrmicro *priv);
 
 #endif // INCLUDE_LINUX_MC3190_H

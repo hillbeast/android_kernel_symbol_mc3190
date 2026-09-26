@@ -69,64 +69,6 @@
 	({ if (0) dev_printk(KERN_DEBUG, dev, format, ##arg); 0; })
 #endif // CONFIG_MFD_MC3190_PM_DEBUG
 
-/*
- * AVR Opcodes:
- * ============
- * 
- * 0x01	: (UNCONFIRMED BUT LIKELY) Touchscreen related
- * 0x02	:
- * 0x03	: Touchscreen X/Y data		(from AVR)
- * 0x04	: System Command Ack 		(from AVR)
- * 0x05	: (TO DECODE) Sets DAT_mem_037c
- * 0x06	: "SPI: Low battery Wakeup Level" (DAT_c0cd953c in SPI.dll)
- * 0x07	: Battery/power status (07 xx yy zz - xx = UNKNOWN, yy = Charging Status? 05 when charging, 04 when not charging/full, zz = Battery Level)
- * 0x08	: (TO DECODE) Sets DAT_mem_0087, calls FUN_code_0438()
- * 0x09	: (TO DECODE) Writes to DAT_mem_0359, 0x0235, 0x0236
- * 0x0A	:
- * 0x0B	: (TO DECODE) Calls FUN_code_17a4(), "SPI: Get SPI Driver ID"
- * 0x0C	: (TO DECODE) Calls FUN_code_1a32() and exits immediately
- * 0x0D	:
- * 0x0E	: (DOESN'T SEEM RIGHT) Backlight / LED Level Control (0x0360, 0x0361, 0x0362)
- * 0x0F	: 
- * 0x10	:
- * 	   -05 : Battery mV
- * 	   -07 : Battery percent and charge status flags? (10 07 xx yy - xx = 00 discharging, 07 when full, 05 when charging, 06 charging nearly full (charge light stopped blinking), yy = battery percentage (shows FF when AVR doesn't want to show percent))
- * 0x11	: (TO DECODE) Calls FUN_code_11ac() (Secondary status/query response), "SPI: PwrEvnt"
- * 0x12	:
- * 0x13	: "SPI: Write Smart Batt EEPROM"
- * 0x14	: "SPI: Read Smart Batt EEPROM"
- * 0x15	: (UNCONFIRMED) Power Off / Reset Control (calls FUN_code_0cf0() if params are zero)
- * 0x16	: "SPI: LED State"
- * 0x17	: (TO DECODE) Sets DAT_mem_0376 "SPI: LED2 State"
- * 0x18	: "SPI: Touch Panel Configuration2"
- * 0x19	: (UNCONFIRMED) Reads diagnostic/ADC registers (DAT_mem_00db, DAT_mem_00da, 0x0088) "SPI: IEEE1725 Limits"
- * 0x1A	: (TO DECODE) Sets register DAT_mem_0088
- * 0x1B	:
- * 0x1C	:
- * 0x1D	: (UNCONFIRMED) Battery Fuel Gauge / Charger Thresholds (Checks thresholds like 100, 244/0xf4)
- * 0x1E	: "SPI: USB Charge Current"
- * 0x1F	: "SPI: Gifted Battery Command Response Message"
- * 0x20	: PwrMicro Firmware Version (20 xx yy zz - xx = major, yy = minor, zz = UNKNOWN)
- * 0x21	: PwrMicro Firmware Version (21 xx xx zz - xxxx = user, zz = UNKNOWN)
- * 0x22	: "SPI: Get Date First Use"
- * 0x23	: "SPI: Get Health Byte"
- * 0x24	: (TO DECODE) Sets DAT_mem_0191
- * 0x25	: (TO DECODE) Sets DAT_mem_0089, DAT_mem_008a
- * 0x26	:
- * 0x27	:
- * 0x28	: "SPI: Debug port mode"
- * 0x29	: "SPI: Serial Data Byte Recieved"
- * 0x2A	: (TO DECODE) Dynamic response pointer setup (CONCAT11(param1, param2)) "SPI: Flash Byte"
- * 0x2B	:
- * 0x2C	: "SPI: Debug/Test Data"
- * 0x2D	:
- * 0x2E	:
- * 0x2F	:
- * ...
- * 0x3F : "SPI: Command Error"
- */
-
-
 #define MC3190_RETRY_BIT   0x80
 #define MC3190_TAG_MASK    0x7F
 
@@ -137,42 +79,30 @@
 
 static void pwrmicro_init_tags(struct mc3190_pwrmicro *priv) {
 	priv->register_data[MC3190_TAG_PWR_EVENT_TBC].is_valid_register = true;
-	priv->register_data[MC3190_TAG_PWR_EVENT_TBC].needs_update = true;
-	priv->register_data[MC3190_TAG_PWR_EVENT_TBC].always_needs_update = true;
 	priv->register_data[MC3190_TAG_PWR_EVENT_TBC].needed_initiator = MC3190_TAG_PWR_EVENT;
 	priv->register_data[MC3190_TAG_PWR_EVENT_TBC].alternate_initiator = MC3190_TAG_PWR_EVENT_TBC;
 
 	priv->cmd10_subdata[MC3190_TAG_PWR_BATTMV].is_valid_register = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_BATTMV].needs_update = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_BATTMV].always_needs_update = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_EVENT_TBC_SUB06].is_valid_register = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_EVENT_TBC_SUB06].needs_update = true;
 	priv->cmd10_subdata[MC3190_TAG_PWR_BATTPERCENT].is_valid_register = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_BATTPERCENT].needs_update = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_BATTPERCENT].always_needs_update = true;
 	priv->cmd10_subdata[MC3190_TAG_PWR_BATTTEMPERATURE].is_valid_register = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_BATTTEMPERATURE].needs_update = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_BATTTEMPERATURE].always_needs_update = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_EVENT_TBC_SUB09].is_valid_register = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_EVENT_TBC_SUB09].needs_update = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_EVENT_TBC_SUB14].is_valid_register = true;
-	priv->cmd10_subdata[MC3190_TAG_PWR_EVENT_TBC_SUB14].needs_update = true;
+	priv->cmd10_subdata[MC3190_TAG_PWR_BACKUPBATTVOLT].is_valid_register = true;
+	priv->cmd10_subdata[MC3190_TAG_PWR_BATTRATEDCAP].is_valid_register = true;
+	priv->cmd10_subdata[MC3190_TAG_PWR_BATTRATEDCAP].oneshot_read = true;
+	priv->cmd10_subdata[MC3190_TAG_PWR_BATTINSTCURRENT].is_valid_register = true;
+	priv->cmd10_subdata[MC3190_TAG_PWR_BATTTYPE].is_valid_register = true;
 
 	priv->register_data[MC3190_TAG_PWR_EVENT].is_valid_register = true;
-	priv->register_data[MC3190_TAG_PWR_EVENT].needs_update = true;
-	priv->register_data[MC3190_TAG_PWR_EVENT].always_needs_update = true;
 	priv->register_data[MC3190_TAG_PWR_EVENT].needed_initiator = MC3190_TAG_BATT_CAP_EVENT;
 
 	priv->register_data[MC3190_TAG_VER].is_valid_register = true;
-	priv->register_data[MC3190_TAG_VER].needs_update = true;
 	priv->register_data[MC3190_TAG_VER].needed_initiator = MC3190_TAG_PWR_EVENT;
 
 	priv->register_data[MC3190_TAG_USERVER].is_valid_register = true;
-	priv->register_data[MC3190_TAG_USERVER].needs_update = true;
 	priv->register_data[MC3190_TAG_USERVER].needed_initiator = MC3190_TAG_VER;
+	priv->register_data[MC3190_TAG_USERVER].oneshot_read = true;
+	priv->register_data[MC3190_TAG_USERVER].needs_update = true;
 
 	priv->register_data[MC3190_TAG_CMD_ERR].is_valid_register = false;
-	priv->register_data[MC3190_TAG_CMD_ERR].needs_update = false;
 }
 
 static void pwrmicro_send_ack(bool awaiting_packet) {
@@ -202,7 +132,7 @@ static void mc3190_request_information(struct mc3190_pwrmicro *priv, u8 rx_tag)
 				(priv->register_data[i].needed_initiator == rx_tag || priv->register_data[i].alternate_initiator == rx_tag)) {
 			if (i == MC3190_TAG_PWR_EVENT_TBC) {
 				int j = 0;
-				for (j = 0; j <= MC3190_TAG_PWR_EVENT_TBC_SUB14; j++) {
+				for (j = 0; j <= MC3190_TAG_PWR_MAXTAGS; j++) {
 					if (priv->cmd10_subdata[j].is_valid_register && priv->cmd10_subdata[j].needs_update) {
 						priv->have_outstanding_request = true;
 						priv->outstanding_request_tag = i;
@@ -245,13 +175,13 @@ static void mc3190_store_register_data(struct mc3190_pwrmicro *priv, u8 reg, u32
 static void pwrmicro_reset_always_needs_updates(struct mc3190_pwrmicro *priv) {
 	int i = 0;
 	for (i = 0; i < MC3190_TAG_CMD_ERR; i++) {
-		if (priv->register_data[i].is_valid_register && priv->register_data[i].always_needs_update) {
+		if (priv->register_data[i].is_valid_register && !priv->register_data[i].oneshot_read) {
 			priv->register_data[i].needs_update = true;
 		}
 	}	
 
-	for (i = 0; i < MC3190_TAG_PWR_EVENT_TBC_SUB14; i++) {
-		if (priv->cmd10_subdata[i].is_valid_register && priv->cmd10_subdata[i].always_needs_update) {
+	for (i = 0; i <= MC3190_TAG_PWR_MAXTAGS; i++) {
+		if (priv->cmd10_subdata[i].is_valid_register && !priv->cmd10_subdata[i].oneshot_read) {
 			priv->cmd10_subdata[i].needs_update = true;
 		}
 	}	
