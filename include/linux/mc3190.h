@@ -49,6 +49,8 @@ extern void mc3190_bl_set_power(int on);
 #define MC3190_CPLD_REG_BL			0x1c
 #define MC3190_CPLD_REG_USB_STATUS	0x24
 #define MC3190_CPLD_REG_AUDIO		0x28
+#define MC3190_CPLD_REG_BT_1		0x44
+#define MC3190_CPLD_REG_BT_2		0x64
 #define MC3190_CPLD_REG_LCD			0x74
 
 #define MC3190_CPLD_LCD_LCD_BIT_0   (1 << 0)
@@ -56,6 +58,8 @@ extern void mc3190_bl_set_power(int on);
 #define MC3190_CPLD_LCD_EN_BIT      (1 << 0)
 #define MC3190_CPLD_LCD_READY_BIT   (1 << 2)
 #define MC3190_CPLD_LCD_BL_BIT      (1 << 3)
+#define MC3190_CPLD_BT_POWER_BIT	(1 << 0)
+#define MC3190_CPLD_BT_UART_BIT		(1 << 6)
 
 #define MC3190_CPLD_USB_CONNECTED_BIT	(1 << 5)
 
