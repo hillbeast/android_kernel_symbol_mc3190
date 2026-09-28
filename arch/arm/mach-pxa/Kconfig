@@ -440,6 +440,7 @@ config MACH_MC3190
 	bool "Symbol MC3190"
 	select CPU_PXA320
 	select HAVE_PWM
+	select PXA_HAVE_BOARD_IRQS
 
 config PXA_SHARPSL
 	bool "SHARP Zaurus SL-5600, SL-C7xx and SL-Cxx00 Models"

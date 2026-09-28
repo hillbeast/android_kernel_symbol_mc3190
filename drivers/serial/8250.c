@@ -1398,6 +1398,8 @@ receive_chars(struct uart_8250_port *up, unsigned int *status)
 			 */
 			ch = 0;
 
+		pr_info("%s: rx byte=0x%02x\n", __func__, ch);   // <- new
+
 		flag = TTY_NORMAL;
 		up->port.icount.rx++;
 
@@ -1476,6 +1478,7 @@ static void transmit_chars(struct uart_8250_port *up)
 	count = up->tx_loadsz;
 	do {
 		serial_out(up, UART_TX, xmit->buf[xmit->tail]);
+		pr_info("%s: tx byte=0x%02x\n", __func__, xmit->buf[xmit->tail]);
 		xmit->tail = (xmit->tail + 1) & (UART_XMIT_SIZE - 1);
 		up->port.icount.tx++;
 		if (uart_circ_empty(xmit))
@@ -1525,6 +1528,7 @@ static void serial8250_handle_port(struct uart_8250_port *up)
 	spin_lock_irqsave(&up->port.lock, flags);
 
 	status = serial_inp(up, UART_LSR);
+	pr_info("%s: lsr=0x%02x\n", __func__, status);
 
 	DEBUG_INTR("status = %x...", status);
 
@@ -1559,6 +1563,7 @@ static irqreturn_t serial8250_interrupt(int irq, void *dev_id)
 
 	DEBUG_INTR("serial8250_interrupt(%d)...", irq);
 
+	pr_info("serial8250_interrupt(%d)...", irq);
 	spin_lock(&i->lock);
 
 	l = i->head;
@@ -2882,9 +2887,15 @@ int serial8250_find_port(struct uart_port *p)
 static struct uart_driver serial8250_reg = {
 	.owner			= THIS_MODULE,
 	.driver_name		= "serial",
+#ifdef CONFIG_MACH_MC3190
+	.dev_name		= "ttyBT",
+	.major			= 0,
+	.minor			= 0,
+#else
 	.dev_name		= "ttyS",
 	.major			= TTY_MAJOR,
 	.minor			= 64,
+#endif
 	.cons			= SERIAL8250_CONSOLE,
 };
 

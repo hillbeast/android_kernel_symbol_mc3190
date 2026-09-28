@@ -18,6 +18,7 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
+#include <linux/serial_8250.h>
 #include <linux/spi/spi.h>
 #include <linux/usb/android_composite.h>
 
@@ -236,6 +237,11 @@ static struct resource mc3190_cpld_resources[] = {
         .end    	= MC3190_CPLD_BASE + MC3190_CPLD_SZ - 1,
         .flags  	= IORESOURCE_MEM,
     },
+	{
+		.start		= gpio_to_irq(9),
+		.end		= gpio_to_irq(9),
+		.flags		= IORESOURCE_IRQ,
+	},
 };
 
 static struct platform_device mc3190_cpld_device = {
@@ -349,6 +355,26 @@ static struct platform_device mc3190_pwrmicro_device = {
 	.id            = -1,
 	.resource      = mc3190_ssp4_resources,
 	.num_resources = ARRAY_SIZE(mc3190_ssp4_resources),
+};
+
+static struct plat_serial8250_port mc3190_extuart_data[] = {
+	[0] = {
+		.mapbase	= 0x14040000,
+		.irq		= IRQ_MC3190_BTUART,
+		.uartclk	= 1843200,
+		.regshift	= 2,
+		.iotype		= UPIO_MEM,
+		.flags		= UPF_BOOT_AUTOCONF | UPF_SKIP_TEST | UPF_IOREMAP,
+	},
+	{},
+};
+
+static struct platform_device mc3190_extuart_device = {
+    .name       = "serial8250",
+    .id         = PLAT8250_DEV_PLATFORM1,
+    .dev        = {
+        .platform_data = mc3190_extuart_data,
+    },
 };
 
 #if defined(CONFIG_MMC)
@@ -583,6 +609,7 @@ static struct platform_device *mc3190_devices[] __initdata = {
 	&mc3190_pwrmicro_device,
 	&mc3190_android_usb_device,
 	&mc3190_wm9713_audio,
+	&mc3190_extuart_device,
 };
 
 static int __init mc3190_cpld_device_init(void)
