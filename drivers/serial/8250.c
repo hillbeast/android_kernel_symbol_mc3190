@@ -2882,15 +2882,9 @@ int serial8250_find_port(struct uart_port *p)
 static struct uart_driver serial8250_reg = {
 	.owner			= THIS_MODULE,
 	.driver_name		= "serial",
-#ifdef CONFIG_MACH_MC3190
-	.dev_name		= "ttyBT",
-	.major			= 0,
-	.minor			= 0,
-#else
 	.dev_name		= "ttyS",
 	.major			= TTY_MAJOR,
 	.minor			= 64,
-#endif
 	.cons			= SERIAL8250_CONSOLE,
 };
 
