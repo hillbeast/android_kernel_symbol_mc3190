@@ -236,6 +236,12 @@ static struct resource mc3190_cpld_resources[] = {
         .end    	= MC3190_CPLD_BASE + MC3190_CPLD_SZ - 1,
         .flags  	= IORESOURCE_MEM,
     },
+    {
+		.start		= gpio_to_irq(9),
+		.end		= gpio_to_irq(9),
+		.flags		= IORESOURCE_IRQ,
+	},
+
 };
 
 static struct platform_device mc3190_cpld_device = {
