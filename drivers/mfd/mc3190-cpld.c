@@ -35,34 +35,33 @@ static int cpld_irq;
 static void mc3190_cpld_irq_noop(unsigned int irq) { }
 
 static struct irq_chip mc3190_btuart_irq_chip = {
-	.name   = "cpld-btuart",
-	.ack    = mc3190_cpld_irq_noop,
-	.mask   = mc3190_cpld_irq_noop,
-	.unmask = mc3190_cpld_irq_noop,
+    .name   = "cpld-btuart",
+    .ack    = mc3190_cpld_irq_noop,
+    .mask   = mc3190_cpld_irq_noop,
+    .unmask = mc3190_cpld_irq_noop,
 };
 
 static irqreturn_t mc3190_cpld_isr(int irq, void *dev_id)
 {
-	u32 status;
+    u32 status;
 
-	do {
-		status = readl(cpld_base + MC3190_CPLD_REG_ISR);
-        pr_info("%s: status=0x%08x\n", __func__, status);
-		if (!(status & MC3190_CPLD_ISR_MASK))
-			break;
+    do {
+        status = readl(cpld_base + MC3190_CPLD_REG_ISR);
+        
+        if (!(status & MC3190_CPLD_ISR_MASK))
+            break;
 
-		writel(status & MC3190_CPLD_ISR_MASK, cpld_base + MC3190_CPLD_REG_ISR);
-
-		if (status & MC3190_CPLD_ISR_BTUART_BIT) {
-            pr_info("%s: dispatching %d\n", __func__, IRQ_MC3190_BTUART);   
-			generic_handle_irq(IRQ_MC3190_BTUART);
+        writel(status & MC3190_CPLD_ISR_MASK, cpld_base + MC3190_CPLD_REG_ISR);
+        
+        if (status & MC3190_CPLD_ISR_BTUART_BIT) {
+            generic_handle_irq(IRQ_MC3190_BTUART);
         }
 
-		/* Add other aggregated CPLD sources here as they're implemented */
+        /* Add other aggregated CPLD sources here as they're implemented */
 
-	} while (1);
+    } while (1);
 
-	return IRQ_HANDLED;
+    return IRQ_HANDLED;
 }
 
 u16 mc3190_cpld_read(unsigned int reg)
@@ -212,14 +211,14 @@ static int __devinit mc3190_cpld_probe(struct platform_device *pdev)
 
         err = request_irq(cpld_irq, mc3190_cpld_isr, IRQF_TRIGGER_RISING, "cpld-isr", NULL);
         if (err)
-            dev_err(&pdev->dev, "Failed to request CPLD IRQ %d: %d\n", cpld_irq, err);
+        dev_err(&pdev->dev, "Failed to request CPLD IRQ %d: %d\n", cpld_irq, err);
     }
 
     ret = mc3190_cpld_read(MC3190_CPLD_REG_VERSION);
     majorVersion = (ret & 0xFF) >> 5;
     minorVersion = (ret & 0x1F);
 
-    dev_info(&pdev->dev, "MC3190 CPLD driver ready (CPLD version: %d.%d)\n", majorVersion, minorVersion);
+    dev_info(&pdev->dev, "MC3190 CPLD driver ready at IRQ %d (CPLD version: %d.%d)\n", cpld_irq, majorVersion, minorVersion);
     return 0;
 }
 

@@ -59,17 +59,21 @@ extern void mc3190_bl_set_power(int on);
 #define MC3190_CPLD_REG_BT_2		0x64
 #define MC3190_CPLD_REG_LCD			0x74
 
-#define MC3190_CPLD_LCD_LCD_BIT_0   (1 << 0)
-#define MC3190_CPLD_LCD_LCD_BIT_1   (1 << 1)
-#define MC3190_CPLD_LCD_EN_BIT      (1 << 0)
-#define MC3190_CPLD_LCD_READY_BIT   (1 << 2)
-#define MC3190_CPLD_LCD_BL_BIT      (1 << 3)
-#define MC3190_CPLD_BT_POWER_BIT	(1 << 0)
-#define MC3190_CPLD_BT_UART_BIT		(1 << 6)
+#define MC3190_CPLD_LCD_LCD_BIT_0   	(1 << 0)
+#define MC3190_CPLD_LCD_LCD_BIT_1   	(1 << 1)
+#define MC3190_CPLD_LCD_EN_BIT      	(1 << 0)
+#define MC3190_CPLD_LCD_READY_BIT   	(1 << 2)
+#define MC3190_CPLD_LCD_BL_BIT      	(1 << 3)
+
+#define MC3190_CPLD_BT_POWER_BIT		(1 << 0)
+#define MC3190_CPLD_BT_UART_BIT			(1 << 6)
 
 #define MC3190_CPLD_USB_CONNECTED_BIT	(1 << 5)
 
-#define MC3190_CPLD_AUDIOAMP_BIT	(1 << 1)
+#define MC3190_CPLD_AUDIOAMP_BIT		(1 << 1)
+
+#define MC3190_CPLD_ISR_BTUART_BIT		(1 << 17)
+#define MC3190_CPLD_ISR_MASK			(MC3190_CPLD_ISR_BTUART_BIT) 	// Add other handled IRQs later
 
 #define MC3190_CPLD_ISR_BTUART_BIT	(1 << 17)
 #define MC3190_CPLD_ISR_MASK		(MC3190_CPLD_ISR_BTUART_BIT) 	// Add other handled IRQs later
