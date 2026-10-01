@@ -589,6 +589,7 @@ static struct platform_device *mc3190_devices[] __initdata = {
 	&mc3190_pwrmicro_device,
 	&mc3190_android_usb_device,
 	&mc3190_wm9713_audio,
+	&pxa3xx_device_gcu,
 };
 
 static int __init mc3190_cpld_device_init(void)
