@@ -34,5 +34,33 @@ struct pxa3xx_gcu_shared {
 #define PXA3XX_GCU_IOCTL_RESET		_IO('G', 0)
 #define PXA3XX_GCU_IOCTL_WAIT_IDLE	_IO('G', 2)
 
+/* Physically contiguous, CPU-cached buffers. */
+
+#define PXA3XX_GCU_MAX_BUFS		4
+#define PXA3XX_GCU_BUF_MAX_SIZE		(1024 * 1024)
+
+/* mmap() offset of buffer <id> is BASE + id * STRIDE (also returned by the
+ * ALLOC ioctl, so user space need not compute it). */
+#define PXA3XX_GCU_BUF_MMAP_BASE	0x01000000UL
+#define PXA3XX_GCU_BUF_MMAP_STRIDE	0x00100000UL
+
+struct pxa3xx_gcu_buf_req {
+	__u32 size;			/* in:  requested size in bytes */
+	__u32 id;			/* out: buffer id */
+	__u32 phys;			/* out: physical address (use in GCU commands) */
+	__u32 mmap_offset;	/* out: offset to pass to mmap() */
+	__u32 alloc_size;	/* out: size actually allocated (page multiple) */
+};
+
+struct pxa3xx_gcu_sync_req {
+	__u32 id;
+	__u32 offset;		/* byte offset into the buffer */
+	__u32 len;			/* number of bytes */
+};
+
+#define PXA3XX_GCU_IOCTL_ALLOC_BUF	_IOWR('G', 3, struct pxa3xx_gcu_buf_req)
+#define PXA3XX_GCU_IOCTL_FREE_BUF	_IOW('G', 4, __u32)
+#define PXA3XX_GCU_IOCTL_SYNC_BUF	_IOW('G', 5, struct pxa3xx_gcu_sync_req)
+
 #endif /* __PXA3XX_GCU_H__ */
 

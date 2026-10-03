@@ -46,6 +46,11 @@
 #include <linux/clk.h>
 #include <linux/fs.h>
 #include <linux/io.h>
+#include <linux/mm.h>
+#include <linux/mutex.h>
+
+#include <asm/cacheflush.h>
+#include <asm/outercache.h>
 
 #include "pxa3xx-gcu.h"
 
@@ -96,7 +101,21 @@ struct pxa3xx_gcu_batch {
 	unsigned long		 length;
 };
 
+/* A physically contiguous buffer that can be mapped into user space. */
+struct pxa3xx_gcu_buf {
+	void			*kaddr;			/* NULL: slot is free */
+	phys_addr_t		 phys;
+	size_t			 size;
+	struct file		*owner;			/* the open file that allocated it */
+	struct mm_struct	*mm;		/* the process that mapped it */
+	unsigned long		 uaddr;		/* start of that user mapping */
+	int			 map_count;
+};
+
 struct pxa3xx_gcu_priv {
+	struct device		 *dev;
+	struct mutex		  buf_lock;	/* protects bufs[] */
+	struct pxa3xx_gcu_buf	  bufs[PXA3XX_GCU_MAX_BUFS];
 	void __iomem		 *mmio_base;
 	struct clk		 *clk;
 	struct pxa3xx_gcu_shared *shared;
@@ -372,6 +391,294 @@ pxa3xx_gcu_wait_free(struct pxa3xx_gcu_priv *priv)
 	return ret;
 }
 
+static int pxa3xx_gcu_quiesce(struct pxa3xx_gcu_priv *priv)
+{
+	if (!priv->shared->hw_running)
+		return 0;
+
+	if (!wait_event_timeout(priv->wait_idle,
+				!priv->shared->hw_running, HZ * 4))
+		return -ETIMEDOUT;
+
+	return 0;
+}
+
+static struct pxa3xx_gcu_buf *
+buf_lookup(struct pxa3xx_gcu_priv *priv, struct file *filp, u32 id)
+{
+	struct pxa3xx_gcu_buf *buf;
+
+	if (id >= PXA3XX_GCU_MAX_BUFS)
+		return NULL;
+
+	buf = &priv->bufs[id];
+	if (!buf->kaddr || buf->owner != filp)
+		return NULL;
+
+	return buf;
+}
+
+/* priv->buf_lock must be held. The caller has made sure the GCU is idle. */
+static void
+buf_release(struct pxa3xx_gcu_buf *buf)
+{
+	free_pages_exact(buf->kaddr, buf->size);
+	memset(buf, 0, sizeof(*buf));
+}
+
+static int
+pxa3xx_gcu_buf_alloc(struct pxa3xx_gcu_priv *priv, struct file *filp,
+		     struct pxa3xx_gcu_buf_req __user *ureq)
+{
+	struct pxa3xx_gcu_buf_req req;
+	struct pxa3xx_gcu_buf *buf = NULL;
+	dma_addr_t dma;
+	size_t size;
+	int i, ret = 0;
+
+	if (copy_from_user(&req, ureq, sizeof(req)))
+		return -EFAULT;
+
+	if (!req.size || req.size > PXA3XX_GCU_BUF_MAX_SIZE)
+		return -EINVAL;
+
+	size = PAGE_ALIGN(req.size);
+
+	mutex_lock(&priv->buf_lock);
+
+	for (i = 0; i < PXA3XX_GCU_MAX_BUFS; i++) {
+		if (!priv->bufs[i].kaddr) {
+			buf = &priv->bufs[i];
+			break;
+		}
+	}
+	if (!buf) {
+		ret = -ENOSPC;
+		goto out;
+	}
+
+	/* zeroed, so nothing stale is handed to user space */
+	buf->kaddr = alloc_pages_exact(size, GFP_KERNEL | __GFP_ZERO);
+	if (!buf->kaddr) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/* Write the zeroes out of the kernel's cached alias, so the later
+	 * cached user mapping (a different virtual address; the caches are
+	 * virtually indexed) can never see stale kernel-side lines. */
+	dma = dma_map_single(priv->dev, buf->kaddr, size, DMA_TO_DEVICE);
+	if (dma_mapping_error(priv->dev, dma)) {
+		free_pages_exact(buf->kaddr, size);
+		buf->kaddr = NULL;
+		ret = -EIO;
+		goto out;
+	}
+	dma_unmap_single(priv->dev, dma, size, DMA_TO_DEVICE);
+
+	buf->phys = virt_to_phys(buf->kaddr);
+	buf->size = size;
+	buf->owner = filp;
+	buf->mm = NULL;
+	buf->uaddr = 0;
+	buf->map_count = 0;
+
+	req.id = i;
+	req.phys = buf->phys;
+	req.mmap_offset = PXA3XX_GCU_BUF_MMAP_BASE +
+			  i * PXA3XX_GCU_BUF_MMAP_STRIDE;
+	req.alloc_size = size;
+
+	if (copy_to_user(ureq, &req, sizeof(req))) {
+		buf_release(buf);
+		ret = -EFAULT;
+	}
+out:
+	mutex_unlock(&priv->buf_lock);
+	return ret;
+}
+
+static int
+pxa3xx_gcu_buf_free(struct pxa3xx_gcu_priv *priv, struct file *filp,
+		    u32 __user *uid)
+{
+	struct pxa3xx_gcu_buf *buf;
+	u32 id;
+	int ret = 0;
+
+	if (get_user(id, uid))
+		return -EFAULT;
+
+	mutex_lock(&priv->buf_lock);
+
+	buf = buf_lookup(priv, filp, id);
+	if (!buf)
+		ret = -EINVAL;
+	else if (buf->map_count)
+		ret = -EBUSY;			/* munmap() it first */
+	else if (pxa3xx_gcu_quiesce(priv))
+		ret = -ETIMEDOUT;		/* GCU might still read it */
+	else
+		buf_release(buf);
+
+	mutex_unlock(&priv->buf_lock);
+	return ret;
+}
+
+/*
+ * Make the CPU caches and RAM agree for a range of a buffer: write back
+ * dirty lines (before the GCU reads what the CPU wrote) and drop cached
+ * lines (before the CPU reads what the GCU wrote). The L1 caches are
+ * virtually indexed, so the maintenance has to be done through the *user*
+ * mapping; the kernel's own alias of the buffer is never touched.
+ */
+static int
+pxa3xx_gcu_buf_sync(struct pxa3xx_gcu_priv *priv, struct file *filp,
+		    struct pxa3xx_gcu_sync_req __user *ureq)
+{
+	struct pxa3xx_gcu_sync_req req;
+	struct pxa3xx_gcu_buf *buf;
+	struct vm_area_struct *vma;
+	unsigned long start, end;
+	int ret = 0;
+
+	if (copy_from_user(&req, ureq, sizeof(req)))
+		return -EFAULT;
+
+	mutex_lock(&priv->buf_lock);
+
+	buf = buf_lookup(priv, filp, req.id);
+	if (!buf || !buf->map_count || buf->mm != current->mm) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (req.offset > buf->size || req.len > buf->size - req.offset) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (!req.len)
+		goto out;
+
+	start = buf->uaddr + req.offset;
+	end = start + req.len;
+
+	down_read(&current->mm->mmap_sem);
+	vma = find_vma(current->mm, start);
+	if (vma && vma->vm_start <= start && end <= vma->vm_end &&
+	    vma->vm_private_data == buf) {
+		flush_cache_range(vma, start, end);	/* L1, by user address */
+	} else {
+		ret = -EFAULT;
+	}
+	up_read(&current->mm->mmap_sem);
+
+	if (!ret)
+		outer_flush_range(buf->phys + req.offset,
+				  buf->phys + req.offset + req.len);	/* L2, if any */
+out:
+	mutex_unlock(&priv->buf_lock);
+	return ret;
+}
+
+static void
+buf_vm_close(struct vm_area_struct *vma)
+{
+	struct pxa3xx_gcu_buf *buf = vma->vm_private_data;
+
+	/* buf_lock is not needed to clear these; the owner file cannot be
+	 * released (and the buffer freed) before this mapping is gone. */
+	buf->map_count = 0;
+	buf->uaddr = 0;
+	buf->mm = NULL;
+}
+
+static const struct vm_operations_struct buf_vm_ops = {
+	.close = buf_vm_close,
+};
+
+static int
+pxa3xx_gcu_buf_mmap(struct pxa3xx_gcu_priv *priv, struct file *filp,
+		    struct vm_area_struct *vma)
+{
+	unsigned long rel = (vma->vm_pgoff << PAGE_SHIFT) -
+			    PXA3XX_GCU_BUF_MMAP_BASE;
+	unsigned long size = vma->vm_end - vma->vm_start;
+	struct pxa3xx_gcu_buf *buf;
+	int ret;
+
+	if (rel % PXA3XX_GCU_BUF_MMAP_STRIDE)
+		return -EINVAL;
+
+	mutex_lock(&priv->buf_lock);
+
+	buf = buf_lookup(priv, filp, rel / PXA3XX_GCU_BUF_MMAP_STRIDE);
+	if (!buf) {
+		ret = -EINVAL;
+	} else if (size > buf->size) {
+		ret = -EINVAL;
+	} else if (buf->map_count) {
+		ret = -EBUSY;			/* one mapping at a time */
+	} else {
+		/* vm_page_prot is left alone: a normal cached mapping */
+		ret = remap_pfn_range(vma, vma->vm_start,
+				      buf->phys >> PAGE_SHIFT, size,
+				      vma->vm_page_prot);
+		if (!ret) {
+			vma->vm_flags |= VM_DONTCOPY | VM_DONTEXPAND;
+			vma->vm_private_data = buf;
+			vma->vm_ops = &buf_vm_ops;
+			buf->mm = vma->vm_mm;
+			buf->uaddr = vma->vm_start;
+			buf->map_count = 1;
+		}
+	}
+
+	mutex_unlock(&priv->buf_lock);
+	return ret;
+}
+
+/* The device node was closed: give back everything this file allocated. */
+static int
+pxa3xx_gcu_misc_release(struct inode *inode, struct file *filp)
+{
+	struct pxa3xx_gcu_priv *priv =
+		container_of(filp->f_op, struct pxa3xx_gcu_priv, misc_fops);
+	int i, owns = 0, not_idle;
+
+	mutex_lock(&priv->buf_lock);
+
+	for (i = 0; i < PXA3XX_GCU_MAX_BUFS; i++)
+		if (priv->bufs[i].kaddr && priv->bufs[i].owner == filp)
+			owns = 1;
+
+	if (!owns) {
+		/* the common case: do not stall close() waiting for the GCU */
+		mutex_unlock(&priv->buf_lock);
+		return 0;
+	}
+
+	not_idle = pxa3xx_gcu_quiesce(priv);
+
+	for (i = 0; i < PXA3XX_GCU_MAX_BUFS; i++) {
+		struct pxa3xx_gcu_buf *buf = &priv->bufs[i];
+
+		if (!buf->kaddr || buf->owner != filp)
+			continue;
+
+		if (not_idle || buf->map_count) {
+			/* GCU hung or mapping still alive: leaking the memory
+			 * is safer than letting it be reused under the GCU */
+			dev_warn(priv->dev, "leaking contiguous buffer %d\n", i);
+			buf->owner = NULL;
+			continue;
+		}
+		buf_release(buf);
+	}
+
+	mutex_unlock(&priv->buf_lock);
+	return 0;
+}
+
 /* Misc device layer */
 
 static ssize_t
@@ -470,6 +777,17 @@ pxa3xx_gcu_misc_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 
 	case PXA3XX_GCU_IOCTL_WAIT_IDLE:
 		return pxa3xx_gcu_wait_idle(priv);
+
+	case PXA3XX_GCU_IOCTL_ALLOC_BUF:
+		return pxa3xx_gcu_buf_alloc(priv, filp,
+				(struct pxa3xx_gcu_buf_req __user *) arg);
+
+	case PXA3XX_GCU_IOCTL_FREE_BUF:
+		return pxa3xx_gcu_buf_free(priv, filp, (u32 __user *) arg);
+
+	case PXA3XX_GCU_IOCTL_SYNC_BUF:
+		return pxa3xx_gcu_buf_sync(priv, filp,
+				(struct pxa3xx_gcu_sync_req __user *) arg);
 	}
 
 	return -ENOSYS;
@@ -481,6 +799,9 @@ pxa3xx_gcu_misc_mmap(struct file *filp, struct vm_area_struct *vma)
 	unsigned int size = vma->vm_end - vma->vm_start;
 	struct pxa3xx_gcu_priv *priv =
 		container_of(filp->f_op, struct pxa3xx_gcu_priv, misc_fops);
+
+	if (vma->vm_pgoff >= (PXA3XX_GCU_BUF_MMAP_BASE >> PAGE_SHIFT))
+		return pxa3xx_gcu_buf_mmap(priv, filp, vma);
 
 	switch (vma->vm_pgoff) {
 	case 0:
@@ -590,6 +911,9 @@ pxa3xx_gcu_probe(struct platform_device *dev)
 	if (!priv)
 		return -ENOMEM;
 
+	priv->dev = &dev->dev;
+	mutex_init(&priv->buf_lock);
+
 	for (i = 0; i < 8; i++) {
 		ret = add_buffer(dev, priv);
 		if (ret) {
@@ -611,6 +935,7 @@ pxa3xx_gcu_probe(struct platform_device *dev)
 	priv->misc_fops.write	= pxa3xx_gcu_misc_write;
 	priv->misc_fops.unlocked_ioctl = pxa3xx_gcu_misc_ioctl;
 	priv->misc_fops.mmap	= pxa3xx_gcu_misc_mmap;
+	priv->misc_fops.release	= pxa3xx_gcu_misc_release;
 
 	priv->misc_dev.minor	= MISCDEV_MINOR,
 	priv->misc_dev.name	= DRV_NAME,
@@ -690,9 +1015,11 @@ pxa3xx_gcu_probe(struct platform_device *dev)
 	pxa3xx_gcu_reset(priv);
 	pxa3xx_gcu_init_debug_timer();
 
-	dev_info(&dev->dev, "registered @0x%p, DMA 0x%p (%d bytes), IRQ %d\n",
+	dev_info(&dev->dev, "registered @0x%p, DMA 0x%p (%d bytes), IRQ %d, "
+			"up to %d contiguous user buffers of %d bytes\n",
 			(void *) r->start, (void *) priv->shared_phys,
-			SHARED_SIZE, irq);
+			SHARED_SIZE, irq, PXA3XX_GCU_MAX_BUFS,
+			PXA3XX_GCU_BUF_MAX_SIZE);
 	return 0;
 
 err_put_clk:
@@ -724,10 +1051,17 @@ pxa3xx_gcu_remove(struct platform_device *dev)
 {
 	struct pxa3xx_gcu_priv *priv = platform_get_drvdata(dev);
 	struct resource *r = priv->resource_mem;
+	int i;
 
 	pxa3xx_gcu_wait_idle(priv);
 
 	misc_deregister(&priv->misc_dev);
+
+	mutex_lock(&priv->buf_lock);
+	for (i = 0; i < PXA3XX_GCU_MAX_BUFS; i++)
+		if (priv->bufs[i].kaddr)
+			buf_release(&priv->bufs[i]);
+	mutex_unlock(&priv->buf_lock);
 	dma_free_coherent(&dev->dev, SHARED_SIZE,
 			priv->shared, priv->shared_phys);
 	iounmap(priv->mmio_base);
