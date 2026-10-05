@@ -44,18 +44,27 @@ struct pxa3xx_gcu_shared {
 #define PXA3XX_GCU_BUF_MMAP_BASE	0x01000000UL
 #define PXA3XX_GCU_BUF_MMAP_STRIDE	0x00100000UL
 
+/* ALLOC_BUF flags */
+#define PXA3XX_GCU_BUF_WRITETHROUGH	1	/* map the buffer write-through */
+
 struct pxa3xx_gcu_buf_req {
 	__u32 size;			/* in:  requested size in bytes */
 	__u32 id;			/* out: buffer id */
 	__u32 phys;			/* out: physical address (use in GCU commands) */
 	__u32 mmap_offset;	/* out: offset to pass to mmap() */
 	__u32 alloc_size;	/* out: size actually allocated (page multiple) */
+	__u32 flags;		/* in:  PXA3XX_GCU_BUF_* */
 };
+
+#define PXA3XX_GCU_SYNC_TO_DEVICE	1
+#define PXA3XX_GCU_SYNC_FROM_DEVICE	2
+#define PXA3XX_GCU_SYNC_DRAIN		4
 
 struct pxa3xx_gcu_sync_req {
 	__u32 id;
 	__u32 offset;		/* byte offset into the buffer */
 	__u32 len;			/* number of bytes */
+	__u32 flags;		/* PXA3XX_GCU_SYNC_*; 0 = full clean + invalidate */
 };
 
 #define PXA3XX_GCU_IOCTL_ALLOC_BUF	_IOWR('G', 3, struct pxa3xx_gcu_buf_req)

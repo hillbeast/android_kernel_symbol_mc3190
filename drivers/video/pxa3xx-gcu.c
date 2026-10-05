@@ -110,6 +110,7 @@ struct pxa3xx_gcu_buf {
 	struct mm_struct	*mm;		/* the process that mapped it */
 	unsigned long		 uaddr;		/* start of that user mapping */
 	int			 map_count;
+	u32			 flags;				/* PXA3XX_GCU_BUF_* */
 };
 
 struct pxa3xx_gcu_priv {
@@ -442,6 +443,9 @@ pxa3xx_gcu_buf_alloc(struct pxa3xx_gcu_priv *priv, struct file *filp,
 	if (!req.size || req.size > PXA3XX_GCU_BUF_MAX_SIZE)
 		return -EINVAL;
 
+	if (req.flags & ~PXA3XX_GCU_BUF_WRITETHROUGH)
+		return -EINVAL;
+
 	size = PAGE_ALIGN(req.size);
 
 	mutex_lock(&priv->buf_lock);
@@ -482,6 +486,7 @@ pxa3xx_gcu_buf_alloc(struct pxa3xx_gcu_priv *priv, struct file *filp,
 	buf->mm = NULL;
 	buf->uaddr = 0;
 	buf->map_count = 0;
+	buf->flags = req.flags;
 
 	req.id = i;
 	req.phys = buf->phys;
@@ -559,6 +564,17 @@ pxa3xx_gcu_buf_sync(struct pxa3xx_gcu_priv *priv, struct file *filp,
 	if (!req.len)
 		goto out;
 
+	if (req.flags == PXA3XX_GCU_SYNC_DRAIN) {
+		if (!(buf->flags & PXA3XX_GCU_BUF_WRITETHROUGH)) {
+			ret = -EINVAL;		/* needs a write-through buffer */
+			goto out;
+		}
+		mb();				/* drain the CPU write buffer */
+		outer_clean_range(buf->phys + req.offset,
+				  buf->phys + req.offset + req.len);
+		goto out;
+	}
+
 	start = buf->uaddr + req.offset;
 	end = start + req.len;
 
@@ -566,15 +582,25 @@ pxa3xx_gcu_buf_sync(struct pxa3xx_gcu_priv *priv, struct file *filp,
 	vma = find_vma(current->mm, start);
 	if (vma && vma->vm_start <= start && end <= vma->vm_end &&
 	    vma->vm_private_data == buf) {
-		flush_cache_range(vma, start, end);	/* L1, by user address */
+		if (req.flags == PXA3XX_GCU_SYNC_TO_DEVICE)
+			/* write dirty lines back, keep them cached */
+			flush_cache_user_range(start, end);
+		else
+			/* write back and drop the lines */
+			flush_cache_range(vma, start, end);
 	} else {
 		ret = -EFAULT;
 	}
 	up_read(&current->mm->mmap_sem);
 
-	if (!ret)
-		outer_flush_range(buf->phys + req.offset,
-				  buf->phys + req.offset + req.len);	/* L2, if any */
+	if (!ret) {
+		if (req.flags == PXA3XX_GCU_SYNC_TO_DEVICE)
+			outer_clean_range(buf->phys + req.offset,
+					  buf->phys + req.offset + req.len);
+		else
+			outer_flush_range(buf->phys + req.offset,
+					  buf->phys + req.offset + req.len);
+	}
 out:
 	mutex_unlock(&priv->buf_lock);
 	return ret;
@@ -619,7 +645,11 @@ pxa3xx_gcu_buf_mmap(struct pxa3xx_gcu_priv *priv, struct file *filp,
 	} else if (buf->map_count) {
 		ret = -EBUSY;			/* one mapping at a time */
 	} else {
-		/* vm_page_prot is left alone: a normal cached mapping */
+		/* normal cached (write-back) mapping, unless write-through
+		 * was requested at allocation */
+		if (buf->flags & PXA3XX_GCU_BUF_WRITETHROUGH)
+			vma->vm_page_prot = __pgprot_modify(vma->vm_page_prot,
+					L_PTE_MT_MASK, L_PTE_MT_WRITETHROUGH);
 		ret = remap_pfn_range(vma, vma->vm_start,
 				      buf->phys >> PAGE_SHIFT, size,
 				      vma->vm_page_prot);
@@ -1051,17 +1081,21 @@ pxa3xx_gcu_remove(struct platform_device *dev)
 {
 	struct pxa3xx_gcu_priv *priv = platform_get_drvdata(dev);
 	struct resource *r = priv->resource_mem;
-	int i;
 
 	pxa3xx_gcu_wait_idle(priv);
 
 	misc_deregister(&priv->misc_dev);
 
-	mutex_lock(&priv->buf_lock);
-	for (i = 0; i < PXA3XX_GCU_MAX_BUFS; i++)
-		if (priv->bufs[i].kaddr)
-			buf_release(&priv->bufs[i]);
-	mutex_unlock(&priv->buf_lock);
+	/* normally empty: every file release frees its buffers */
+	{
+		int i;
+
+		mutex_lock(&priv->buf_lock);
+		for (i = 0; i < PXA3XX_GCU_MAX_BUFS; i++)
+			if (priv->bufs[i].kaddr)
+				buf_release(&priv->bufs[i]);
+		mutex_unlock(&priv->buf_lock);
+	}
 	dma_free_coherent(&dev->dev, SHARED_SIZE,
 			priv->shared, priv->shared_phys);
 	iounmap(priv->mmio_base);
