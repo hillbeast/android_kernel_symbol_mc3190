@@ -644,6 +644,7 @@ static int cpufreq_governor_interactive(struct cpufreq_policy *new_policy,
 static int __init cpufreq_interactive_init(void)
 {
 	unsigned int i;
+	int rc;
 	struct cpufreq_interactive_cpuinfo *pcpu;
 	struct sched_param param = { .sched_priority = MAX_RT_PRIO-1 };
 
@@ -670,8 +671,10 @@ static int __init cpufreq_interactive_init(void)
 	   warm cache (probably doesn't matter much). */
 	down_wq = create_workqueue("knteractive_down");
 
-	if (! down_wq)
-		goto err_freeuptask;
+	if (!down_wq) {
+		rc = -ENOMEM;
+		goto err_stopuptask;
+	}
 
 	INIT_WORK(&freq_scale_down_work,
 		  cpufreq_interactive_freq_down);
@@ -685,11 +688,19 @@ static int __init cpufreq_interactive_init(void)
 	dbg_proc->read_proc = dbg_proc_read;
 #endif
 
-	return cpufreq_register_governor(&cpufreq_gov_interactive);
+	rc = cpufreq_register_governor(&cpufreq_gov_interactive);
+	if (rc)
+		goto err_destroywq;
 
-err_freeuptask:
+	wake_up_process(up_task);
+	return 0;
+
+err_destroywq:
+	destroy_workqueue(down_wq);
+err_stopuptask:
+	kthread_stop(up_task);
 	put_task_struct(up_task);
-	return -ENOMEM;
+	return rc;
 }
 
 #ifdef CONFIG_CPU_FREQ_DEFAULT_GOV_INTERACTIVE
