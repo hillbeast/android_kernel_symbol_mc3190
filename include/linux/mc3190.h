@@ -14,6 +14,10 @@
 #define INCLUDE_LINUX_MC3190_H
 
 #include <linux/input.h>
+#include <linux/spinlock.h>
+#include <linux/mutex.h>
+#include <linux/completion.h>
+#include <linux/workqueue.h>
 
 #define EXT_GPIO(x)		(128 + (x))
 
@@ -153,6 +157,9 @@ extern int mc3190_cpld_regoff_wait(u16 val, unsigned int reg, u16 wait_bit, unsi
 #define MC3190_TAG_CMD_ERR          0x3F			// FIXME: TBC Function and data
 
 
+/* Version 0x20 is GetTermType, 0x11 is the power event; both are plain reads. */
+#define MC3190_DRIVER_ID_WORD		0x0B010000	// WinCE SetDriverID. Also (re)opens the AVR's TX gate.
+
 struct avr_register {
 	u8 data[3];
 	bool is_valid_register;
@@ -162,6 +169,33 @@ struct avr_register {
 	u8 alternate_initiator;
 };
 
+/* Diagnostic counters, exposed through the pm_status sysfs attribute. */
+struct mc3190_pm_stats {
+	u32 frames;		/* words received from the AVR */
+	u32 tag0_frames;	/* dummy frames */
+	u32 retry_frames;	/* AVR re-sent a word (bit 7 set) */
+	u32 rx_dropped;		/* RX ring was full */
+	u32 ror;		/* SSP receive overrun */
+	u32 bce;		/* SSP bit count error */
+	u32 tur;		/* SSP transmit underrun */
+	u32 resyncs;
+	u32 recoveries;
+	u32 handshake_ok;
+	u32 handshake_fail;
+	u32 req_sent;
+	u32 req_retries;
+	u32 req_abandoned;	/* timed out MC3190_REQ_MAX_RETRIES times */
+	u32 cmd_errors;		/* AVR answered 0x3F */
+	u32 bad_subtag;		/* 0x10 reply with out-of-range sub tag */
+	u32 pings;
+	u32 ping_fail;
+	u32 stage_fail;		/* couldn't write SSDR (BSY stuck / FIFO full) */
+	u32 stuck_touch;
+	u32 avr_resets;
+};
+
+#define MC3190_RXQ_SIZE		16
+
 struct mc3190_touch;
 
 struct mc3190_pwrmicro {
@@ -169,24 +203,40 @@ struct mc3190_pwrmicro {
 	void __iomem *regs;
 	int irq;
 
+	/* Locking:
+	 *  lock          - SSP registers and the RX ring. Taken from hard IRQ.
+	 *  ack_lock      - ACK GPIO pulse sequencing. Taken from hard IRQ.
+	 *  proto_lock    - everything below the "protocol state" comment.
+	 *  recover_lock  - serialises resync / handshake / health checks.
+	 */
 	spinlock_t lock;
-	u32 last_rx_word;
-	bool have_rx_word;
-	struct work_struct rx_work;
+	spinlock_t ack_lock;
+	struct mutex proto_lock;
+	struct mutex recover_lock;
 
+	/* RX ring: hard IRQ drains the SSP FIFO into it, the IRQ thread dispatches it */
+	u32 rxq[MC3190_RXQ_SIZE];
+	unsigned int rxq_head;
+	unsigned int rxq_tail;
+
+	struct workqueue_struct *wq;
 	struct delayed_work ready_work;
+	struct delayed_work watch_work;
+	struct work_struct cmd_work;
+	unsigned long cmd_flags;
+	bool shutting_down;
+
+	struct mc3190_touch *touch_dev;
+	struct power_supply *battery_psy;
+
+	/* ---- protocol state (proto_lock) ---- */
 	bool ready_for_gated_tags;
+	bool handshaking;		/* suppress request chaining while we run the handshake */
 
 	bool have_last_cmd;
 	u8   last_cmd_tag;
 	u32  last_cmd_payload;
-	u32 last_sent_word;
-
-	bool have_reply;
-	u32  last_reply;
-
-	struct mc3190_touch *touch_dev;
-	struct power_supply *battery_psy;
+	u32  last_sent_word;
 
 	bool in_state_machine;
 	u8   state_machine;
@@ -194,6 +244,34 @@ struct mc3190_pwrmicro {
 	bool have_outstanding_request;
 	u8   outstanding_request_tag;
 	u32  outstanding_request_word;
+	unsigned long outstanding_deadline;
+	u8   outstanding_retries;	/* watchdog re-sends */
+	u8   outstanding_stages;	/* re-stages on incoming frames */
+	bool sent_pending_frame;	/* we staged a word and haven't seen a frame since */
+	unsigned int consecutive_failures;
+
+	/* synchronous requests (handshake / ping) */
+	struct completion sync_done;
+	bool sync_active;
+	int  sync_result;
+
+	/* link health */
+	unsigned long last_frame_jiffies;
+	unsigned long last_touch_jiffies;
+	bool ssp_error;			/* set from IRQ on ROR/BCE or when staging fails */
+	bool link_down;
+	unsigned long next_recover;
+	unsigned int recover_failures;
+
+	struct mc3190_pm_stats stats;
+
+	/* Battery percentage smoothing (see mc3190-battery.c), protected by soc_lock */
+	spinlock_t soc_lock;
+	bool soc_have_real;			/* AVR has reported a real percentage at least once */
+	u8 soc_last_real;			/* last real percentage the AVR reported */
+	unsigned long soc_last_real_jiffies;	/* when it reported it */
+	int soc_reported;			/* what we currently show while the AVR sends 0xFF */
+	unsigned long soc_last_drop_jiffies;
 
 	struct avr_register register_data[MC3190_TAG_CMD_ERR + 1];
 	struct avr_register cmd10_subdata[MC3190_TAG_PWR_MAXTAGS + 1];

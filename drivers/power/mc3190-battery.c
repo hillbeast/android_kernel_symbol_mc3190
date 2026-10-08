@@ -23,6 +23,8 @@
 #include <linux/power_supply.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
+#include <linux/jiffies.h>
+#include <linux/spinlock.h>
 
 #include <linux/mc3190.h>
 
@@ -55,7 +57,9 @@ static ssize_t backup_voltage_now_show(struct device *dev,
 					char *buf)
 {
 	struct power_supply *psy = dev_get_drvdata(dev);
-	struct mc3190_pwrmicro *priv = dev_get_drvdata(psy->dev->parent);
+	/* the parent's drvdata is struct mc3190_battery, not the core */
+	struct mc3190_battery *bat = container_of(psy, struct mc3190_battery, psy);
+	struct mc3190_pwrmicro *priv = bat->core;
 
 	int microvolts = mc3190_get_backup_battery_voltage(priv);
 
@@ -73,7 +77,10 @@ EXPORT_SYMBOL_GPL(mc3190_get_pwr_status);
 
 void mc3190_set_battery_psy(struct mc3190_pwrmicro *priv, struct power_supply *psy)
 {
+	/* the IRQ thread uses battery_psy under proto_lock */
+	mutex_lock(&priv->proto_lock);
 	priv->battery_psy = psy;
+	mutex_unlock(&priv->proto_lock);
 }
 EXPORT_SYMBOL_GPL(mc3190_set_battery_psy);
 
@@ -119,42 +126,100 @@ int mc3190_get_battery_rated_capacity(struct mc3190_pwrmicro *priv)
 EXPORT_SYMBOL_GPL(mc3190_get_battery_rated_capacity);
 
 #define MC3190_BATT_INTERNAL_RESISTANCE_MOHM 150
-#define BATT_MAX_MV 4200
-#define BATT_MIN_MV 3400
+/* Never trust more than this much IR correction: the current reading spikes at plug/unplug */
+#define MC3190_BATT_MAX_IR_COMP_MV	100
+
+/*
+ * While the AVR reports "unknown" (0xFF, i.e. on charge) we show an estimate.
+ * It is never allowed to fall below the last real percentage the AVR gave us,
+ * until we have been without a real reading for this long. After that it may
+ * follow the estimate down, at most one percent per MC3190_SOC_DROP_STEP_MS.
+ */
+#define MC3190_SOC_HOLD_MS		(10 * 60 * 1000)
+#define MC3190_SOC_DROP_STEP_MS		(60 * 1000)
+
+static const struct { u16 mv; u8 pct; } mc3190_ocv_curve[] = {
+	{ 3400,   0 }, { 3610,   5 }, { 3690,  10 }, { 3710,  15 }, { 3730,  20 },
+	{ 3750,  25 }, { 3770,  30 }, { 3790,  35 }, { 3800,  40 }, { 3820,  45 },
+	{ 3840,  50 }, { 3850,  55 }, { 3870,  60 }, { 3910,  65 }, { 3950,  70 },
+	{ 3980,  75 }, { 4020,  80 }, { 4080,  85 }, { 4110,  90 }, { 4150,  95 },
+	{ 4200, 100 },
+};
 
 static int mc3190_mv_to_percent(int voltage_mv, int current_ua)
 {
 	int current_ma = current_ua / 1000;
-	int compensated_mv;
-	int percent;
-
 	int v_drop_mv = (current_ma * MC3190_BATT_INTERNAL_RESISTANCE_MOHM) / 1000;
-	compensated_mv = voltage_mv - v_drop_mv;
+	int mv, i;
+	const int last = ARRAY_SIZE(mc3190_ocv_curve) - 1;
 
-	if (compensated_mv >= BATT_MAX_MV)
+	if (v_drop_mv > MC3190_BATT_MAX_IR_COMP_MV)
+		v_drop_mv = MC3190_BATT_MAX_IR_COMP_MV;
+	else if (v_drop_mv < -MC3190_BATT_MAX_IR_COMP_MV)
+		v_drop_mv = -MC3190_BATT_MAX_IR_COMP_MV;
+	mv = voltage_mv - v_drop_mv;
+
+	if (mv >= mc3190_ocv_curve[last].mv)
 		return 100;
-	if (compensated_mv <= BATT_MIN_MV)
+	if (mv <= mc3190_ocv_curve[0].mv)
 		return 0;
 
-	percent = ((compensated_mv - BATT_MIN_MV) * 100) / (BATT_MAX_MV - BATT_MIN_MV);
+	for (i = 1; i <= last; i++) {
+		if (mv <= mc3190_ocv_curve[i].mv) {
+			int dmv = mc3190_ocv_curve[i].mv - mc3190_ocv_curve[i - 1].mv;
+			int dpc = mc3190_ocv_curve[i].pct - mc3190_ocv_curve[i - 1].pct;
 
-	return percent;
+			return mc3190_ocv_curve[i - 1].pct +
+			       (mv - mc3190_ocv_curve[i - 1].mv) * dpc / dmv;
+		}
+	}
+	return 100;
 }
 
 int mc3190_get_battery_capacity(struct mc3190_pwrmicro *priv)
 {
 	u8 percent = priv->cmd10_subdata[MC3190_TAG_PWR_BATTPERCENT].data[1];
-	int mv, ua, ret;
+	unsigned long flags, now = jiffies;
+	int mv, ua, est, ret;
 
-	if (percent != 0xFF)
+	if (percent != 0xFF) {
+		spin_lock_irqsave(&priv->soc_lock, flags);
+		priv->soc_reported = percent;
+		spin_unlock_irqrestore(&priv->soc_lock, flags);
 		return percent;
+	}
 
 	mv = mc3190_get_battery_voltage(priv) / 1000;
 	ua = mc3190_get_battery_current(priv);
-	if (mv == 0)
-		return -ENODATA;
+	spin_lock_irqsave(&priv->soc_lock, flags);
 
-	return mc3190_mv_to_percent(mv, ua);
+	if (mv == 0) {
+		ret = priv->soc_have_real ? priv->soc_reported : -ENODATA;
+		goto out;
+	}
+
+	est = mc3190_mv_to_percent(mv, ua);
+	/* Only report 100% once the AVR says the pack is full */
+	if (est > 99 && mc3190_get_battery_status(priv) != POWER_SUPPLY_STATUS_FULL)
+		est = 99;
+
+	if (!priv->soc_have_real) {
+		/* Nothing better to go on */
+		priv->soc_reported = est;
+	} else if (est >= priv->soc_reported) {
+		priv->soc_reported = est;	/* charging up: follow the estimate */
+	} else if (time_after(now, priv->soc_last_real_jiffies + msecs_to_jiffies(MC3190_SOC_HOLD_MS)) &&
+		   time_after(now, priv->soc_last_drop_jiffies + msecs_to_jiffies(MC3190_SOC_DROP_STEP_MS))) {
+		/* Long without a real reading and still reading lower: let it creep down */
+		priv->soc_reported--;
+		priv->soc_last_drop_jiffies = now;
+	}
+	/* else: estimate is lower than the last known level, hold it */
+
+	ret = priv->soc_reported;
+out:
+	spin_unlock_irqrestore(&priv->soc_lock, flags);
+	return ret;
 }
 EXPORT_SYMBOL_GPL(mc3190_get_battery_capacity);
 
