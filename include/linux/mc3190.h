@@ -28,18 +28,11 @@ struct mc3190_bl_platform_data {
 	int	dft_brightness;
 };
 
-struct mc3190_bl_data {
-	struct pwm_device *pwm;
-	struct mc3190_bl_platform_data *pdata;
-	int	powered;
-};
-
 /*
  * Various hardware functions
  */
 
 extern void mc3190_panel_set_power(int on);
-extern void mc3190_bl_set_power(int on);
 
 /*
  * Board specific IRQs/Virtual IRQs

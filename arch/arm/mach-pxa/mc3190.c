@@ -286,15 +286,6 @@ static struct platform_device mc3190_device_leds = {
 	}
 };
 
-static struct platform_device mc3190_backlight_device = {
-	.name	= "mc3190-backlight",
-	.id	= -1,
-	.dev	= {
-		.parent = &pxa27x_device_pwm0.dev,
-		.platform_data = &mc3190_backlight_data,
-	},
-};
-
 static struct spi_board_info mc3190_lcd_spi_board_info[] __initdata = {
 	{
 		.modalias		= "mc3190-lcd-panel",
@@ -302,6 +293,7 @@ static struct spi_board_info mc3190_lcd_spi_board_info[] __initdata = {
 		.chip_select	= 0,
 		.max_speed_hz	= 1000000,
 		.mode			= SPI_MODE_0,
+		.platform_data	= &mc3190_backlight_data,
 	},
 };
 
@@ -334,8 +326,6 @@ static struct pxafb_mach_info mc3190_lcd_info = {
 
 static void __init mc3190_init_lcd(void)
 {
-	platform_device_register(&mc3190_backlight_device);
-
 	set_pxa_fb_info(&mc3190_lcd_info);
 }
 
