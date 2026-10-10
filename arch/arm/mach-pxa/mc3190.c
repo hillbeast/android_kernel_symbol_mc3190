@@ -198,7 +198,7 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	/* GPIOs or unused pins */
 	GPIO1_GPIO,
 	GPIO5_GPIO,
-	GPIO6_GPIO,
+	GPIO6_GPIO,											// USB Host Power
 	GPIO7_GPIO,
 	GPIO8_GPIO | MFP_LPM_EDGE_BOTH | MFP_PULL_HIGH,		// USB_OTG IRQ
 	GPIO9_GPIO | MFP_LPM_EDGE_FALL,						// CPLD IRQ
@@ -211,7 +211,7 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	GPIO36_GPIO,										// Unused AC97 pin. Could be used as GPIO
 	GPIO57_GPIO,										// Barcode Scanner (unsure on purpose)
 //	GPIO58_GPIO,						// Not set in Windows. Linux does not have definition for this GPIO
-	GPIO84_GPIO,						// USB_OTG (TBC)
+	GPIO84_GPIO,										// USB OTG Select
 	GPIO97_GPIO,
 	GPIO98_GPIO,
 	GPIO0_2_GPIO,
@@ -590,8 +590,8 @@ static char *mc3190_usb_functions[] = {
 };
 
 static struct android_usb_platform_data mc3190_android_usb_pdata = {
-    .vendor_id          = 0x05E0,
-    .product_id         = 0x2001,
+    .vendor_id          = 0x18d1,
+    .product_id         = 0x4e12,
     .version            = 0x0100,
     .product_name       = "MC3190",
     .manufacturer_name  = "Symbol Technologies",

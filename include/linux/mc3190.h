@@ -21,6 +21,12 @@
 
 #define EXT_GPIO(x)		(128 + (x))
 
+#define MC3190_UP2OCR_PHYS    0x40600020
+#define MC3190_UP2OCR_DPPUE   0x00000010
+#define MC3190_UP2OCR_CLIENT  0x00020008
+#define MC3190_GPIO_HOST_PWR  6            /* low in client mode */
+#define MC3190_GPIO_OTG_SEL   84           /* high = shared port 2 */
+
 struct mc3190_bl_platform_data {
 	int	pwm_id;
 	unsigned long pwm_period_ns;
@@ -76,7 +82,8 @@ extern void mc3190_panel_set_power(int on);
 #define MC3190_CPLD_AUDIOAMP_BIT		(1 << 1)
 
 #define MC3190_CPLD_ISR_BTUART_BIT		(1 << 17)
-#define MC3190_CPLD_ISR_MASK			(MC3190_CPLD_ISR_BTUART_BIT) 	// Add other handled IRQs later
+#define MC3190_CPLD_ISR_USB_BIT			(1 << 21)
+#define MC3190_CPLD_ISR_MASK			(MC3190_CPLD_ISR_BTUART_BIT | MC3190_CPLD_ISR_USB_BIT)
 
 
 extern u16 mc3190_cpld_read(unsigned int reg);
@@ -86,6 +93,8 @@ extern void mc3190_cpld_rmw(u16 ormask, u16 andmask, unsigned int reg);
 extern int mc3190_cpld_wait_bit(unsigned int reg, u16 bit, bool set, unsigned int timeout_ms);
 extern int mc3190_cpld_regon_wait(u16 val, unsigned int reg, u16 wait_bit, unsigned int timeout_ms);
 extern int mc3190_cpld_regoff_wait(u16 val, unsigned int reg, u16 wait_bit, unsigned int timeout_ms);
+
+extern void pxa_udc_cable_event(int present);
 
 /*
  * AVR Microcontroller MFD Device

@@ -619,7 +619,7 @@ static void inc_ep_stats_bytes(struct pxa_ep *ep, int count, int is_in)
  *
  * Find the physical pxa27x ep, and setup its UDCCR
  */
-static __init void pxa_ep_setup(struct pxa_ep *ep)
+static void pxa_ep_setup(struct pxa_ep *ep)
 {
 	u32 new_udccr;
 
@@ -641,7 +641,7 @@ static __init void pxa_ep_setup(struct pxa_ep *ep)
  *
  * Setup all pxa physical endpoints, except ep0
  */
-static __init void pxa_eps_setup(struct pxa_udc *dev)
+static void pxa_eps_setup(struct pxa_udc *dev)
 {
 	unsigned int i;
 
@@ -1489,7 +1489,7 @@ static int pxa_ep_disable(struct usb_ep *_ep)
 
 	udc_usb_ep = container_of(_ep, struct udc_usb_ep, usb_ep);
 	ep = udc_usb_ep->pxa_ep;
-	if (!ep || is_ep0(ep) || !list_empty(&ep->queue))
+	if (!ep || is_ep0(ep))
 		return -EINVAL;
 
 	ep->enabled = 0;
@@ -1778,6 +1778,7 @@ static void udc_enable(struct pxa_udc *udc)
 	ep0_idle(udc);
 	udc->gadget.speed = USB_SPEED_FULL;
 	memset(&udc->stats, 0, sizeof(udc->stats));
+	pxa_eps_setup(udc);
 
 	udc_set_mask_UDCCR(udc, UDCCR_UDE);
 	ep_write_UDCCSR(&udc->pxa_ep[0], UDCCSR0_ACM);
@@ -2475,6 +2476,26 @@ static struct pxa_udc memory = {
 		PXA_EP_IN_BULK(14,  2, 1, 1, 1),
 	}
 };
+
+void pxa_udc_cable_event(int present)
+{
+	struct pxa_udc *udc = the_controller;
+
+	pr_info("cable_event(%d) enabled=%d speed=%d\n", present, udc->enabled, udc->gadget.speed);
+
+	if (!udc || !udc->driver)
+		return;
+	if (present) {
+		dplus_pullup(udc, 1);
+		if (should_enable_udc(udc))
+			udc_enable(udc);
+	} else {
+		stop_activity(udc, udc->driver);
+		udc_disable(udc);
+		dplus_pullup(udc, 0);
+	}
+}
+EXPORT_SYMBOL(pxa_udc_cable_event);
 
 /**
  * pxa_udc_probe - probes the udc device

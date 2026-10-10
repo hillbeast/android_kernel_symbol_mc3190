@@ -41,26 +41,37 @@ static struct irq_chip mc3190_btuart_irq_chip = {
     .unmask = mc3190_cpld_irq_noop,
 };
 
+static void mc3190_usb_work_fn(struct work_struct *w)
+{
+	pxa_udc_cable_event(!!(mc3190_cpld_read(MC3190_CPLD_REG_USB_STATUS) &
+			       MC3190_CPLD_USB_CONNECTED_BIT));
+}
+static DECLARE_WORK(mc3190_usb_work, mc3190_usb_work_fn);
+
 static irqreturn_t mc3190_cpld_isr(int irq, void *dev_id)
 {
     u32 status;
+    int loops = 0;
 
-    do {
-        status = readl(cpld_base + MC3190_CPLD_REG_ISR);
-        
-        if (!(status & MC3190_CPLD_ISR_MASK))
-            break;
+	while ((status = readl(cpld_base + MC3190_CPLD_REG_ISR))) {
+#ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
+        if (status & ~MC3190_CPLD_ISR_MASK)
+			pr_info("cpld-isr: unhandled bits 0x%08x\n",
+				status & ~MC3190_CPLD_ISR_MASK);
+#endif
 
-        writel(status & MC3190_CPLD_ISR_MASK, cpld_base + MC3190_CPLD_REG_ISR);
-        
-        if (status & MC3190_CPLD_ISR_BTUART_BIT) {
-            generic_handle_irq(IRQ_MC3190_BTUART);
-        }
+		writel(status, cpld_base + MC3190_CPLD_REG_ISR);
 
-        /* Add other aggregated CPLD sources here as they're implemented */
+		if (status & MC3190_CPLD_ISR_BTUART_BIT)
+			generic_handle_irq(IRQ_MC3190_BTUART);
+		if (status & MC3190_CPLD_ISR_USB_BIT)
+			schedule_work(&mc3190_usb_work);
 
-    } while (1);
-
+		if (++loops > 16) {
+			pr_err("cpld-isr: status 0x%08x won't clear\n", status);
+			break;
+		}
+	}
     return IRQ_HANDLED;
 }
 
@@ -231,6 +242,7 @@ static int __devexit mc3190_cpld_remove(struct platform_device *pdev)
         release_mem_region(res->start, resource_size(res));
 
     free_irq(cpld_irq, NULL);
+    cancel_work_sync(&mc3190_usb_work);
 
     return 0;
 }
