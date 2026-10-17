@@ -585,33 +585,9 @@ static struct pxa2xx_udc_mach_info mc3190_udc_info __initdata = {
 	.udc_command = mc3190_udc_command,
 };
 
-static char *mc3190_usb_functions[] = {
-    "adb",
-};
-
-static struct android_usb_platform_data mc3190_android_usb_pdata = {
-    .vendor_id          = 0x18d1,
-    .product_id         = 0x4e12,
-    .version            = 0x0100,
-    .product_name       = "MC3190",
-    .manufacturer_name  = "Symbol Technologies",
-    .serial_number      = "MC3190000001",
-    .num_functions      = ARRAY_SIZE(mc3190_usb_functions),
-    .functions          = mc3190_usb_functions,
-};
-
-static struct platform_device mc3190_android_usb_device = {
-    .name   = "android_usb",
-    .id     = -1,
-    .dev    = {
-        .platform_data = &mc3190_android_usb_pdata,
-    },
-};
-
 static struct platform_device *mc3190_devices[] __initdata = {
 	&pxa_spi_ssp3,
 	&mc3190_pwrmicro_device,
-	&mc3190_android_usb_device,
 	&mc3190_wm9713_audio,
 	&pxa3xx_device_gcu,
 };
