@@ -2447,6 +2447,8 @@ static struct pxa_udc memory = {
 		USB_EP_IN_ISO(3),
 		USB_EP_OUT_ISO(4),
 		USB_EP_IN_INT(5),
+		USB_EP_IN_BULK(6),
+		USB_EP_OUT_BULK(7),
 	},
 
 	.pxa_ep = {
@@ -2464,13 +2466,10 @@ static struct pxa_udc memory = {
 		PXA_EP_OUT_BULK(8, 1, 2, 0, 0),
 		PXA_EP_IN_BULK(9,  2, 2, 0, 0),
 		PXA_EP_IN_INT(10,  5, 2, 0, 0),
-		/*
-		 * All the following endpoints are only for completion.  They
-		 * won't never work, as multiple interfaces are really broken on
-		 * the pxa.
-		*/
-		PXA_EP_OUT_BULK(11, 1, 2, 1, 0),
-		PXA_EP_IN_BULK(12,  2, 2, 1, 0),
+		/* second bulk pair (adb alongside mtp): tagged (cfg1, iface0, alt0)
+		 * because the UDC only tracks one active interface */
+		PXA_EP_IN_BULK(11,  6, 1, 0, 0),
+		PXA_EP_OUT_BULK(12, 7, 1, 0, 0),
 		/* Endpoint for CDC Ether */
 		PXA_EP_OUT_BULK(13, 1, 1, 1, 1),
 		PXA_EP_IN_BULK(14,  2, 1, 1, 1),
