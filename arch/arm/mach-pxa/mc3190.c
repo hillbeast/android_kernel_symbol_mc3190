@@ -21,7 +21,6 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
-#include <linux/usb/android_composite.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
@@ -564,18 +563,22 @@ static int mc3190_udc_is_connected(void)
               MC3190_CPLD_USB_CONNECTED_BIT);
 }
 
+#define MC3190_UP2OCR_PHYS    0x40600020
+#define MC3190_UP2OCR_CLIENT  0x00020008   /* Windows CE USB client mode magic number */
+#define MC3190_UP2OCR_DPPUE   0x00000010   /* D+ pull-up */
+
 static void mc3190_udc_command(int command)
 {
-    switch (command) {
-    case PXA2XX_UDC_CMD_CONNECT:
-		pr_info("%s: PXA2XX_UDC_CMD_CONNECT\n", __func__);
-		// FIXME: Add code
-        break;
-    case PXA2XX_UDC_CMD_DISCONNECT:
-		pr_info("%s: PXA2XX_UDC_CMD_DISCONNECT\n", __func__);
-		// FIXME: Add code
-        break;
-    }
+	void __iomem *up2ocr = (void __iomem *)io_p2v(MC3190_UP2OCR_PHYS);
+	u32 val = MC3190_UP2OCR_CLIENT;
+
+	if (command == PXA2XX_UDC_CMD_CONNECT && mc3190_udc_is_connected())
+		val |= MC3190_UP2OCR_DPPUE;
+
+	__raw_writel(val, up2ocr);
+	pr_info("%s: %s UP2OCR <- 0x%08x (readback 0x%08x)\n", __func__,
+		command == PXA2XX_UDC_CMD_CONNECT ? "CONNECT" : "DISCONNECT",
+		val, __raw_readl(up2ocr));
 }
 
 static struct pxa2xx_udc_mach_info mc3190_udc_info __initdata = {

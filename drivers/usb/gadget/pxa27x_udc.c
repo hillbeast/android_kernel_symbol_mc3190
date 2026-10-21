@@ -1528,6 +1528,8 @@ static struct usb_ep_ops pxa_ep_ops = {
  */
 static void dplus_pullup(struct pxa_udc *udc, int on)
 {
+	clk_enable(udc->clk);
+
 	if (on) {
 		if (gpio_is_valid(udc->mach->gpio_pullup))
 			gpio_set_value(udc->mach->gpio_pullup,
@@ -1541,6 +1543,8 @@ static void dplus_pullup(struct pxa_udc *udc, int on)
 		if (udc->mach->udc_command)
 			udc->mach->udc_command(PXA2XX_UDC_CMD_DISCONNECT);
 	}
+
+	clk_disable(udc->clk);
 	udc->pullup_on = on;
 }
 
@@ -1633,12 +1637,18 @@ static int pxa_udc_pullup(struct usb_gadget *_gadget, int is_active)
 	if (!gpio_is_valid(udc->mach->gpio_pullup) && !udc->mach->udc_command)
 		return -EOPNOTSUPP;
 
-	dplus_pullup(udc, is_active);
-
-	if (should_enable_udc(udc))
-		udc_enable(udc);
-	if (should_disable_udc(udc))
-		udc_disable(udc);
+	if (is_active) {
+		/* bring the UDC up with D+ low, then raise D+ so the host's
+		 * reset can't land inside udc_enable()'s startup window */
+		udc->pullup_on = 1;
+		if (should_enable_udc(udc))
+			udc_enable(udc);
+		dplus_pullup(udc, 1);
+	} else {
+		dplus_pullup(udc, 0);
+		if (should_disable_udc(udc))
+			udc_disable(udc);
+	}
 	return 0;
 }
 
