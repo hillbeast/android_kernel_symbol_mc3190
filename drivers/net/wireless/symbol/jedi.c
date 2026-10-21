@@ -29,6 +29,7 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
+#include <linux/firmware.h>
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
 #include <linux/etherdevice.h>
@@ -49,7 +50,22 @@ bool jedi_debug;
 module_param_named(debug, jedi_debug, bool, 0644);
 MODULE_PARM_DESC(debug, "Enable verbose Jedi driver logging (default off)");
 
-/* ---- PIMFOR management protocol (glossary R5/R6) ---- */
+static bool jedi_reg_test;	// FIXME: Remove me
+module_param_named(reg_test, jedi_reg_test, bool, 0444);
+MODULE_PARM_DESC(reg_test, "Experiment: send a guessed 2.4 GHz regulatory row (R15)");
+
+static char *jedi_country;
+module_param_named(country, jedi_country, charp, 0444);
+
+static bool jedi_rebuild;	// FIXME: Remove me
+module_param_named(rebuild, jedi_rebuild, bool, 0444);
+MODULE_PARM_DESC(rebuild, "Re-send band mask + empty SSID after init (R18.7)");
+
+static bool jedi_uart;		// FIXME: Remove me
+module_param_named(uart, jedi_uart, bool, 0644);
+MODULE_PARM_DESC(uart, "Poll HOST_INT and drain firmware UART text (R18.6)");
+MODULE_PARM_DESC(country, "Country code (2-4 chars) sent with SET 0x1f000002");
+
 #define JEDI_ETH_P_PIMFOR	0x8828
 #define JEDI_PIMFOR_HDR		12		/* version..length */
 #define JEDI_FRAME_HDR		(14 + JEDI_PIMFOR_HDR)	/* 26 */
@@ -63,8 +79,9 @@ MODULE_PARM_DESC(debug, "Enable verbose Jedi driver logging (default off)");
 #define JEDI_OID_MAC		0x00000000	/* GET, 6 bytes */
 
 #define JEDI_REG_RX_LEN		0x1c		/* R16: received frame length */
-#define JEDI_REG_TX_LEN		0x50		/* W16: len | 0x4000; R: ready */
-#define JEDI_TX_READY		0x4000
+#define JEDI_REG_TX_LEN		0x50		/* W16: len | 0xc000; R: ready */
+#define JEDI_TX_READY		0x4000		/* ready bit when reading 0x50 */
+#define JEDI_TX_LEN_FLAGS	0xc000
 #define JEDI_STATUS_RX		0x01		/* status bit 0: RX pending */
 #define JEDI_HOST_INT_TX_FREE	0x0040		/* [INF] TX buffer free */
 
@@ -116,6 +133,13 @@ struct jedi_wext {
 	struct jedi_bss bss[JEDI_MAX_BSS];
 	int nbss;
 	struct iw_statistics stats;
+	u32 rate_kbps;			/* from the link-state trap */
+	u32 rts, frag;			/* last values written */
+	struct {				/* last installed key per index, for removal */
+		bool valid;
+		u8 type, len;
+		u8 mac[ETH_ALEN];
+	} key[4];
 };
 
 struct jedi_private {
@@ -156,6 +180,12 @@ struct jedi_private {
 #define JEDI_OID_STA_KEY_RSC	0x1200000a	/* 64 bytes */
 #define JEDI_OID_SECURITY	0x1200000b	/* suite code */
 #define JEDI_OID_SEC_MODE	0x12000012	/* driver security mode */
+#define JEDI_OID_COUNTRY_LIST	0x1f000001
+#define JEDI_OID_COUNTRY	0x1f000002
+#define JEDI_OID_DOT11D_MODE	0x1f000004
+#define JEDI_OID_REG_BEGIN	0x00000010
+#define JEDI_OID_REG_TABLE	0x1f00000e
+#define JEDI_OID_REG_DONE	0x02000000
 #define JEDI_OID_BAND_PREF	0x14000003
 #define JEDI_OID_WWR_MODE	0x1f000005
 #define JEDI_OID_CISCO_SCAN_DIS	0x13000109
@@ -191,7 +221,7 @@ struct jedi_private {
 #define JEDI_SCAN_LEN		12	/* scan parameter block */
 #define JEDI_SCAN_RETRIES	3
 #define JEDI_SCAN_RETRY_MS	2500
-#define JEDI_SCAN_WAIT_MS	3000	/* guess: time for a full scan */
+#define JEDI_SCAN_WAIT_MS	4000	/* WinCE waits ~4 s (trace findings 9) */
 
 #define JEDI_TXQ_MAX		64
 #define JEDI_TXQ_LOW		16
@@ -208,10 +238,31 @@ static void jedi_dump_frame(struct sdio_func *func, const char *dir,
 }
 
 /*
+ * R8.x (WinCE trace findings): power-save handshake that follows most TX
+ * frames. Read CCCR 0x05 (function 0, bus power-save/sleep state); if it
+ * reads 0 the device is not already awake/ready, so nudge it by writing
+ * CTRL (0x38) = 0x02 twice. Our driver was missing this entirely. Best
+ * effort only: errors here are not fatal to the TX itself.
+ */
+static void jedi_tx_powersave_kick(struct jedi_private *priv)
+{
+	struct sdio_func *func = priv->func;
+	int err;
+	u8 v;
+
+	v = sdio_f0_readb(func, 0x05, &err);
+	if (err || v != 0)
+		return;
+	jedi_reg_write(func, JEDI_REG_CTRL, 1, 0x02);
+	jedi_reg_write(func, JEDI_REG_CTRL, 1, 0x02);
+}
+
+/*
  * Send one frame (R6.2). Takes the host itself.
  *   1. read 0x50; send only if 0x4000 is set (a failed read counts as ready)
- *   2. write 0x50 = len | 0x4000
+ *   2. write 0x50 = len | 0xc000 (bits 14+15, per the WinCE trace findings)
  *   3. write the frame to the data port in bursts of at most 512 bytes
+ *   4. power-save handshake (jedi_tx_powersave_kick)
  */
 static int jedi_tx_frame(struct jedi_private *priv, const u8 *frame, u32 len)
 {
@@ -241,7 +292,7 @@ static int jedi_tx_frame(struct jedi_private *priv, const u8 *frame, u32 len)
 		goto out;
 	}
 
-	ret = jedi_reg_write(func, JEDI_REG_TX_LEN, 2, len | JEDI_TX_READY);
+	ret = jedi_reg_write(func, JEDI_REG_TX_LEN, 2, len | JEDI_TX_LEN_FLAGS);
 	if (ret)
 		goto out;
 
@@ -258,6 +309,7 @@ static int jedi_tx_frame(struct jedi_private *priv, const u8 *frame, u32 len)
 		}
 		sent += n;
 	}
+	jedi_tx_powersave_kick(priv);
 out:
 	sdio_release_host(func);
 	return ret;
@@ -615,6 +667,27 @@ static void jedi_wext_link_event(struct jedi_private *priv, const u8 *bssid)
 	wireless_send_event(priv->ndev, SIOCGIWAP, &wrqu, NULL);
 }
 
+/*
+ * Tell the supplicant about a TKIP MIC failure. The trap does not say whether
+ * the frame was unicast or group, or which key index; report pairwise/key 0
+ * (the supplicant counts failures either way). TODO: refine once known.
+ */
+static void jedi_wext_mic_failure(struct jedi_private *priv, const u8 *src)
+{
+	struct iw_michaelmicfailure ev;
+	union iwreq_data wrqu;
+
+	memset(&ev, 0, sizeof(ev));
+	ev.flags = IW_MICFAILURE_PAIRWISE;
+	ev.src_addr.sa_family = ARPHRD_ETHER;
+	if (src)
+		memcpy(ev.src_addr.sa_data, src, ETH_ALEN);
+	memset(&wrqu, 0, sizeof(wrqu));
+	wrqu.data.length = sizeof(ev);
+	wireless_send_event(priv->ndev, IWEVMICHAELMICFAILURE, &wrqu,
+			    (char *)&ev);
+}
+
 static void __maybe_unused jedi_wext_bss_clear(struct jedi_private *priv)
 {
 	mutex_lock(&priv->wx.lock);
@@ -687,6 +760,8 @@ static int jedi_hw_set_ssid_empty(struct jedi_private *priv)
 	return ret;
 }
 
+static int jedi_hw_set_ssid(struct jedi_private *priv, const u8 *ssid, u8 len);
+
 static int jedi_init_set(struct jedi_private *priv, u32 oid, u32 val)
 {
 	int ret = jedi_set_u32(priv, oid, val);
@@ -709,6 +784,198 @@ static int jedi_init_get(struct jedi_private *priv, u32 oid, u32 size,
 }
 
 /*
+ * Regulatory tables (R15.1). The firmware's tables are empty in the image;
+ * the host must download them with SET 0x1f00000e BEFORE the MLME starts
+ * (the SET fails once the empty-SSID SET has run). Source:
+ *   /lib/firmware/jedi_reg.bin: a sequence of { u16 LE length, blob }, each
+ *   blob forwarded unchanged (WinCE stores up to 11 blobs of <= 0x400 bytes).
+ * Without that file, module parameter reg_test=1 sends one guessed row.
+ *
+ * After the blobs, WinCE sends SET 0x02000000. The WinCE trace findings
+ * (dump-wifienabled.bin) captured the real payload and the real reply:
+ *   TX: 01 01 00 00 00 0d 00 02 00 00 00 04 00 00 00 00
+ *   RX: 01 02 00 00 00 0d 00 02 00 00 00 04 00 00 00 00  (RESP, ~207ms later)
+ * Our old payload (01 00 00 ... all zero after the first byte) was wrong
+ * and got an error frame back instead. Byte 1 (0x01 -> 0x02 in the reply)
+ * looks like an ack/sequence style field the firmware flips; send WinCE's
+ * exact bytes rather than guessing at the meaning of the rest.
+ */
+/* Exact bytes WinCE sends for the commit (see the comment above). */
+static void jedi_hw_reg_commit(struct jedi_private *priv)
+{
+	static const u8 blk[16] = {
+		0x01, 0x01, 0x00, 0x00, 0x00, 0x0d, 0x00, 0x02,
+		0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00,
+	};
+	int ret = jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_REG_DONE, blk,
+			   sizeof(blk), NULL, 0, NULL);
+
+	jedi_dbg(priv->func, "SET 0x02000000: %d\n", ret);
+}
+
+static int jedi_hw_regulatory(struct jedi_private *priv)
+{
+	struct sdio_func *func = priv->func;
+	const struct firmware *fw;
+	int sent = 0, ret;
+
+	/* R16.2: begin download. Clears the MLME lock and the tables-supplied
+	 * flag, stops the MLME; SET 0x1f00000e fails without it once locked. */
+	ret = jedi_set_u32(priv, JEDI_OID_REG_BEGIN, 0);
+	jedi_dbg(func, "SET 0x10 = 0 (regulatory begin): %d\n", ret);
+
+	if (!request_firmware(&fw, "jedi_reg.bin", &func->dev)) {
+		const u8 *p = fw->data, *end = fw->data + fw->size;
+
+		while (end - p >= 2) {
+			u32 len = get_unaligned_le16(p);
+
+			p += 2;
+			if (!len || len > 0x400 || len > end - p) {
+				dev_warn(&func->dev,
+					 "jedi: jedi_reg.bin: bad blob length %u\n",
+					 len);
+				break;
+			}
+			ret = jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_REG_TABLE, p,
+				       len, NULL, 0, NULL);
+			dev_info(&func->dev,
+				 "jedi: regulatory blob %d (%u bytes): %d\n",
+				 sent, len, ret);
+			sent++;
+			p += len;
+		}
+		release_firmware(fw);
+	} else if (jedi_reg_test) {
+
+		static const u8 rec[16] = {
+			0x00, 0x00,		/* row index */
+			0x01,			/* record count */
+			0x00,			/* table 0 = 2.4 GHz */
+			'N', 'Z', 0x20, 0x00,	/* [0..3] country */
+			0x01, 0x0d,		/* [4] first channel, [5] count 13 */
+			0x12, 0x00,		/* [6] base power, [7] back-off */
+			0x00, 0x00, 0x30, 0x00,	/* [8],[9],[10] class,[11] */
+		};
+
+		ret = jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_REG_TABLE, rec,
+			       sizeof(rec), NULL, 0, NULL);
+		dev_info(&func->dev, "jedi: regulatory TEST row: %d\n", ret);
+		if (!ret)
+			sent = 1;
+	} else {
+		dev_info(&func->dev,
+			 "jedi: no jedi_reg.bin, regulatory tables stay empty\n");
+	}
+
+	if (sent)
+		jedi_hw_reg_commit(priv);
+	return sent;
+}
+
+static void jedi_hw_reg_finish(struct jedi_private *priv)
+{
+	jedi_init_set(priv, JEDI_OID_BAND_MASK, 1);
+	jedi_init_set(priv, JEDI_OID_BAND_MASK, 1);
+	jedi_init_set(priv, JEDI_OID_DOT11D_MODE, 0);
+	jedi_init_set(priv, JEDI_OID_DOT11D_MODE, 1);
+	jedi_init_set(priv, JEDI_OID_WWR_MODE, 3);
+	jedi_hw_reg_commit(priv);
+}
+
+/* Country string (R15.2): 2 chars -> {c1,c2,0x20,0}, 3 chars -> {c1,c2,c3,0} */
+static void jedi_hw_country(struct jedi_private *priv)
+{
+	u8 b[4] = { 0 };
+	size_t n;
+	int ret;
+
+	if (!jedi_country || !*jedi_country)
+		return;
+	n = strlen(jedi_country);
+	if (n < 2 || n > 4)
+		return;
+	if (n == 2) {
+		b[0] = jedi_country[0];
+		b[1] = jedi_country[1];
+		b[2] = 0x20;
+	} else {
+		memcpy(b, jedi_country, 3);
+	}
+	ret = jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_COUNTRY, b, 4, NULL, 0, NULL);
+	dev_info(&priv->func->dev, "jedi: country %s: %d\n", jedi_country, ret);
+}
+
+/* GET 0x1f000002: current country, then the 4-byte entries it accepts. */
+static void jedi_hw_log_countries(struct jedi_private *priv)
+{
+	u8 *b = kzalloc(0x104, GFP_KERNEL);
+	u32 got = 0;
+
+	if (!b)
+		return;
+	if (!jedi_cmd(priv, JEDI_OP_GET, JEDI_OID_COUNTRY, NULL, 0x104, b, 0x104,
+		      &got))
+		dev_info(&priv->func->dev,
+			 "jedi: country '%.4s', %u bytes (%u accepted)\n", b, got,
+			 got > 4 ? (got - 4) / 4 : 0);
+	if (jedi_debug && got)
+		print_hex_dump_bytes("jedi: countries ", DUMP_PREFIX_OFFSET, b,
+				     min_t(u32, got, 64));
+	kfree(b);
+}
+
+
+/*
+ * R18.6 experiment: the firmware's debug log may be bridged through register
+ * 0x50 with HOST_INT 0x8000 = data ready. Poll HOST_INT, log it whenever any
+ * bit other than the known TX-free/awake ones is set, and drain text.
+ * @tag names the init step so the log shows when text appeared.
+ */
+static void jedi_uart_poll(struct jedi_private *priv, const char *tag)
+{
+	struct sdio_func *func = priv->func;
+	char line[128];
+	int n = 0, i, ret;
+	u32 hi = 0;
+
+	if (!jedi_uart)
+		return;
+	sdio_claim_host(func);
+	ret = jedi_reg_read(func, JEDI_REG_HOST_INT, 2, &hi);
+	if (ret) {
+		sdio_release_host(func);
+		return;
+	}
+	dev_info(&func->dev, "jedi: uart[%s] HOST_INT=0x%04x\n", tag, hi);
+	for (i = 0; (hi & 0x8000) && i < 4096; i++) {
+		u8 c = sdio_readb(func, JEDI_REG_TX_LEN, &ret);
+
+		if (ret)
+			break;
+		jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 2, 0x8000);
+		if (c == '\n' || n == sizeof(line) - 1) {
+			line[n] = 0;
+			dev_info(&func->dev, "jedi: fwlog: %s\n", line);
+			n = 0;
+			if (c == '\n')
+				goto next;
+		}
+		if (c >= 0x20 && c < 0x7f)
+			line[n++] = c;
+next:
+		hi = 0;
+		if (jedi_reg_read(func, JEDI_REG_HOST_INT, 2, &hi))
+			break;
+	}
+	if (n) {
+		line[n] = 0;
+		dev_info(&func->dev, "jedi: fwlog: %s\n", line);
+	}
+	sdio_release_host(func);
+}
+
+/*
  * Start-up sequence as WinCE sends it (glossary R7.6, R7.6b, R8.4): the
  * init job (R6-A) then the configuration job (R6-B), using the driver's
  * built-in defaults. Steps WinCE skips with this registry are not sent.
@@ -719,12 +986,19 @@ static void jedi_hw_init(struct jedi_private *priv)
 {
 	u8 b[258];
 	u32 got = 0, phycap = 3;
+	int reg_sent;
 
 	/* --- R6-A init job --- */
 	if (!jedi_init_get(priv, JEDI_OID_RADIO_STATE, 4, b, &got) && got == 4)
 		jedi_dbg(priv->func, "0x0b = 0x%x\n", get_unaligned_le32(b));
 	if (!jedi_init_get(priv, JEDI_OID_INACTIVE_STATE, 4, b, &got) && got == 4)
 		jedi_dbg(priv->func, "0x0c = 0x%x\n", get_unaligned_le32(b));
+	/* WinCE trace findings 3: SET 0x0b = 0 (not 1) after the two GETs. */
+	jedi_init_set(priv, JEDI_OID_RADIO_STATE, 0);
+
+	jedi_uart_poll(priv, "boot");
+	reg_sent = jedi_hw_regulatory(priv);		/* R15: before the MLME */
+	jedi_uart_poll(priv, "after-table");
 
 	jedi_init_set(priv, JEDI_OID_FRAG_THR, 2346);
 	jedi_init_set(priv, JEDI_OID_RTS_THR, 2347);
@@ -742,6 +1016,8 @@ static void jedi_hw_init(struct jedi_private *priv)
 	else if (phycap & 3)
 		jedi_init_set(priv, JEDI_OID_BAND_MASK, phycap & 3);
 
+	jedi_init_set(priv, JEDI_OID_DOT11D_MODE, 1);		/* step 18, 11dMode */
+	jedi_hw_country(priv);
 	jedi_init_set(priv, JEDI_OID_BAND_PREF, 0);		/* step 20 */
 	jedi_init_set(priv, JEDI_OID_WWR_MODE, 3);		/* step 22 */
 	jedi_init_set(priv, JEDI_OID_DSFREQ, 2462000);		/* step 23 */
@@ -754,8 +1030,15 @@ static void jedi_hw_init(struct jedi_private *priv)
 	jedi_init_set(priv, JEDI_OID_ANT_DIVERSITY, 1);
 	jedi_init_set(priv, JEDI_OID_BT_OPTIONS, 0);
 	jedi_set_u32(priv, JEDI_OID_SEC_MODE, 0);
-	jedi_hw_set_ssid_empty(priv);				/* step 25 */
+	jedi_hw_log_countries(priv);
+	jedi_uart_poll(priv, "before-mlme");
+	/* WinCE trace findings 4: the config job's SSID is "-NoProfileApplied-",
+	 * not an empty one. */
+	jedi_hw_set_ssid(priv, (const u8 *)"-NoProfileApplied-", 18);
+	jedi_uart_poll(priv, "after-mlme");
 	jedi_init_set(priv, JEDI_OID_CCX_PARAMS, 5);
+	if (reg_sent)
+		jedi_hw_reg_finish(priv);	/* findings 5, then country GET */
 
 	/*
 	 * R10: the band-mask SET may flag a channel-table rebuild that the
@@ -768,7 +1051,33 @@ static void jedi_hw_init(struct jedi_private *priv)
 			 get_unaligned_le32(b));
 	if (!jedi_init_get(priv, 0x1400000d, 64, b, &got))
 		print_hex_dump_bytes("jedi: chanlist ", DUMP_PREFIX_OFFSET, b,
-				     min_t(u32, got, 32));
+				     min_t(u32, got, 64));
+	jedi_hw_log_countries(priv);	/* after the MLME rebuilt the tables */
+	jedi_uart_poll(priv, "after-wait");
+
+	if (jedi_rebuild) {
+		/* R18.7: change the band mask so the next type 1/2/4 request
+		 * copies it into the band selector, then restart the MLME. */
+		/*
+		 * The manual 'try' runs that produced "NZ " all repeated the whole
+		 * sequence with the MLME already running: SET 0x10 (stops the
+		 * MLME, clears the lock and the tables flag), table, band mask,
+		 * 802.11d, empty SSID. Do the same here.
+		 */
+		jedi_hw_regulatory(priv);
+		jedi_init_set(priv, JEDI_OID_BAND_MASK, 1);
+		jedi_init_set(priv, JEDI_OID_BAND_MASK, 3);
+		jedi_init_set(priv, JEDI_OID_DOT11D_MODE, 1);
+		jedi_hw_set_ssid_empty(priv);
+		msleep(1000);
+		jedi_uart_poll(priv, "after-rebuild");
+		if (!jedi_init_get(priv, 0x1400000d, 256, b, &got)) {
+			dev_info(&priv->func->dev, "jedi: chanlist2: %u bytes\n", got);
+			print_hex_dump_bytes("jedi: chanlist2 ", DUMP_PREFIX_OFFSET,
+					     b, min_t(u32, got, 256));
+		}
+		jedi_hw_log_countries(priv);
+	}
 
 	if (!jedi_init_get(priv, JEDI_OID_SUPP_FREQS, 258, b, &got)) {
 		jedi_dbg(priv->func, "supported frequencies: %u bytes\n", got);
@@ -790,10 +1099,42 @@ static void jedi_hw_init(struct jedi_private *priv)
  * section. Zeros are sent until RE supplies it; the log will show whether
  * the firmware accepts that.
  */
+
+static u8 jedi_ie_channel(const u8 *ie, u32 len)
+{
+	u32 p = 0;
+	u8 ht = 0;
+
+	while (p + 2 <= len) {
+		u8 id = ie[p], l = ie[p + 1];
+
+		if (p + 2 + l > len)
+			break;
+		if (id == 3 && l >= 1)
+			return ie[p + 2];
+		if (id == 61 && l >= 1)
+			ht = ie[p + 2];
+		p += 2 + l;
+	}
+	return ht;
+}
+
+/* Length of @ie trimmed back to a whole-IE boundary within @max bytes. */
+static u32 jedi_ie_trim(const u8 *ie, u32 len, u32 max)
+{
+	u32 p = 0;
+
+	while (p + 2 <= len && p + 2 + ie[p + 1] <= max && p + 2 + ie[p + 1] <= len)
+		p += 2 + ie[p + 1];
+	return p;
+}
+
 static void jedi_parse_bss(struct jedi_private *priv, const u8 *e, u32 len)
 {
 	u8 ssid_len, ch;
-	u16 caps, ie_len, freq;
+	u16 caps = 0, body_len, freq;
+	const u8 *ies = NULL;
+	u32 ies_len = 0;
 
 	if (len < JEDI_BSS_HDR)
 		return;
@@ -801,12 +1142,16 @@ static void jedi_parse_bss(struct jedi_private *priv, const u8 *e, u32 len)
 	if (ssid_len > JEDI_SSID_MAX)
 		ssid_len = JEDI_SSID_MAX;
 	ch = e[0x33];
-	caps = get_unaligned_le16(e + 0x36);
-	ie_len = get_unaligned_le16(e + 0x3e);
-	if (ie_len > len - JEDI_BSS_HDR)
-		ie_len = len - JEDI_BSS_HDR;
-	if (ie_len > JEDI_MAX_IE - 1)
-		ie_len = JEDI_MAX_IE - 1;
+	body_len = get_unaligned_le16(e + 0x3e);
+	if (body_len > len - JEDI_BSS_HDR)
+		body_len = len - JEDI_BSS_HDR;
+	if (body_len >= 12) {
+		caps = get_unaligned_le16(e + JEDI_BSS_HDR + 10);
+		ies = e + JEDI_BSS_HDR + 12;
+		ies_len = jedi_ie_trim(ies, body_len - 12, JEDI_MAX_IE - 1);
+		if (jedi_ie_channel(ies, body_len - 12))
+			ch = jedi_ie_channel(ies, body_len - 12);
+	}
 
 	if (ch >= 1 && ch <= 13)
 		freq = 2407 + 5 * ch;
@@ -816,7 +1161,7 @@ static void jedi_parse_bss(struct jedi_private *priv, const u8 *e, u32 len)
 		freq = 5000 + 5 * ch;
 
 	jedi_wext_bss_add(priv, e, e + 0x0f, ssid_len, freq, (s8)e[0x0d], caps,
-			  e + JEDI_BSS_HDR, ie_len);
+			  ies, ies_len);
 }
 
 static void jedi_scan_work(struct work_struct *work)
@@ -837,12 +1182,18 @@ static void jedi_scan_work(struct work_struct *work)
 		return;
 	}
 
-	for (i = 0; i < JEDI_MAX_BSS; i++) {
-		ret = jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_BSSLIST, req,
-			       sizeof(req), NULL, 0, NULL);
-		if (ret)
-			jedi_dbg(priv->func, "BSS list SET failed: %d\n", ret);
+	/*
+	 * Round-2 log: a SET before EVERY GET resets the list cursor, so the
+	 * firmware returned the first BSS 32 times. WinCE sends ONE SET, then
+	 * GETs until the list is exhausted, then a final SET (trace findings,
+	 * 18.314 to 18.328 s).
+	 */
+	ret = jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_BSSLIST, req, sizeof(req),
+		       NULL, 0, NULL);
+	if (ret)
+		jedi_dbg(priv->func, "BSS list SET failed: %d\n", ret);
 
+	for (i = 0; i < JEDI_MAX_BSS; i++) {
 		got = 0;
 		ret = jedi_cmd(priv, JEDI_OP_GET, JEDI_OID_BSSLIST, NULL,
 			       JEDI_BSS_MAX, e, JEDI_BSS_MAX, &got);
@@ -861,6 +1212,9 @@ static void jedi_scan_work(struct work_struct *work)
 	}
 	jedi_dbg(priv->func, "scan: %d entries read, %d cached\n", i,
 		 priv->wx.nbss);
+	/* WinCE ends the loop with another SET (resets the cursor). */
+	jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_BSSLIST, req, sizeof(req), NULL, 0,
+		 NULL);
 	kfree(e);
 	if (!priv->wx.nbss && priv->scan_tries < JEDI_SCAN_RETRIES) {
 		/* Nothing yet: the scan may still be running. Look again. */
@@ -1044,8 +1398,8 @@ static void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 		jedi_dbg(func, "radio/inactive trap, %u bytes\n", plen);
 		break;
 	case JEDI_OID_MIC_FAIL_TRAP:
-		/* TODO: report IWEVMICHAELMICFAILURE to the supplicant */
 		dev_warn(&func->dev, "jedi: Michael MIC failure, AP %pM\n", p);
+		jedi_wext_mic_failure(priv, plen >= 6 ? p : NULL);
 		break;
 	case JEDI_OID_DEAUTH_TRAP:
 	case JEDI_OID_DISASSOC_TRAP:
@@ -1443,9 +1797,11 @@ static int jedi_install_wep(struct jedi_private *priv, int idx,
 }
 
 /*
- * TKIP/CCMP key (R9.3). TODO(RE): cipher type byte values and the u16 at
- * offset 6 are guesses (TKIP 1, CCMP 2, u16 0); verify on a real association.
+ * TKIP/CCMP key (R9.3, R12.6). Type byte: WEP 0, TKIP 1, CCMP 5. The u16 at
+ * offset 6 (from ctx+0x1c8 in WinCE) is not decoded; 0 is sent.
  */
+#define JEDI_KEY_TKIP	1
+#define JEDI_KEY_CCMP	5
 static int jedi_install_sta_key(struct jedi_private *priv, const u8 *mac,
 				int idx, u8 type, const u8 *key, int len,
 				bool tx, const u8 *rsc)
@@ -1454,6 +1810,12 @@ static int jedi_install_sta_key(struct jedi_private *priv, const u8 *mac,
 
 	if (len > 32)
 		return -EINVAL;
+	if (idx >= 0 && idx < 4 && type != 0) {
+		priv->wx.key[idx].valid = true;
+		priv->wx.key[idx].type = type;
+		priv->wx.key[idx].len = len;
+		memcpy(priv->wx.key[idx].mac, mac, ETH_ALEN);
+	}
 	memcpy(b, mac, ETH_ALEN);
 	/* b[6..7]: unknown u16 */
 	put_unaligned_le16(idx, b + 8);
@@ -1487,13 +1849,33 @@ static int jedi_wx_siwencodeext(struct net_device *dev,
 	bool group = ext->ext_flags & IW_ENCODE_EXT_GROUP_KEY;
 	const u8 *mac;
 	u8 type;
+	u8 tkbuf[32];
 
 	idx = idx ? idx - 1 : 0;
 
 	if ((wrqu->encoding.flags & IW_ENCODE_DISABLED) ||
-	    ext->alg == IW_ENCODE_ALG_NONE)
-		return 0;	/* TODO(RE): no key-remove command known */
-	if (keylen <= 0)
+	    ext->alg == IW_ENCODE_ALG_NONE) {
+		/* R12.7: no remove command decoded; overwrite with a zero key
+		 * of the same type and length (stand-in). */
+		struct jedi_wext *wx = &priv->wx;
+
+		if (idx < 4 && wx->key[idx].valid) {
+			u8 zero[32] = { 0 };
+			u8 mac[ETH_ALEN];
+
+			int ret;
+
+			memcpy(mac, wx->key[idx].mac, ETH_ALEN);
+			ret = jedi_install_sta_key(priv, mac, idx,
+						   wx->key[idx].type, zero,
+						   wx->key[idx].len, false,
+						   NULL);
+			wx->key[idx].valid = false;
+			return ret;
+		}
+		return 0;
+	}
+	if (keylen <= 0 || keylen > 32)
 		return -EINVAL;
 
 	jedi_dbg(priv->func, "set key: alg %u idx %d len %d ext_flags 0x%x\n",
@@ -1503,20 +1885,36 @@ static int jedi_wx_siwencodeext(struct net_device *dev,
 	case IW_ENCODE_ALG_WEP:
 		return jedi_install_wep(priv, idx, ext->key, keylen, tx);
 	case IW_ENCODE_ALG_TKIP:
-		type = 1;	/* TODO(RE) */
+		type = JEDI_KEY_TKIP;
 		break;
 	case IW_ENCODE_ALG_CCMP:
-		type = 2;	/* TODO(RE) */
+		type = JEDI_KEY_CCMP;
 		break;
 	default:
 		return -EOPNOTSUPP;
+	}
+
+	/*
+	 * R12.6: for a supplicant WinCE swaps the two 8-byte Michael MIC keys
+	 * of a 32-byte TKIP key before sending (the firmware expects the
+	 * opposite order from NDIS/WEXT). TODO: verify with a real handshake.
+	 */
+	if (type == JEDI_KEY_TKIP && keylen == 32) {
+		u8 sw[32];
+
+		memcpy(sw, ext->key, 16);
+		memcpy(sw + 16, ext->key + 24, 8);
+		memcpy(sw + 24, ext->key + 16, 8);
+		memcpy(tkbuf, sw, 32);
+	} else {
+		memcpy(tkbuf, ext->key, keylen);
 	}
 
 	/* Group keys are keyed by the BSSID, pairwise by the peer address. */
 	mac = (group || is_zero_ether_addr((u8 *)ext->addr.sa_data) ||
 	       is_broadcast_ether_addr((u8 *)ext->addr.sa_data)) ?
 	      priv->wx.cur_bssid : (u8 *)ext->addr.sa_data;
-	return jedi_install_sta_key(priv, mac, idx, type, ext->key, keylen, tx,
+	return jedi_install_sta_key(priv, mac, idx, type, tkbuf, keylen, tx,
 		(ext->ext_flags & IW_ENCODE_EXT_RX_SEQ_VALID) ? ext->rx_seq : NULL);
 }
 
@@ -1546,6 +1944,124 @@ static int jedi_wx_siwpmksa(struct net_device *dev, struct iw_request_info *info
 	return -EOPNOTSUPP;
 }
 
+static int jedi_wx_giwfreq(struct net_device *dev, struct iw_request_info *info,
+			   union iwreq_data *wrqu, char *extra)
+{
+	struct jedi_private *priv = netdev_priv(dev);
+	struct jedi_wext *wx = &priv->wx;
+	int i;
+
+	memset(&wrqu->freq, 0, sizeof(wrqu->freq));
+	mutex_lock(&wx->lock);
+	if (wx->connected) {
+		for (i = 0; i < wx->nbss; i++) {
+			if (!memcmp(wx->bss[i].bssid, wx->cur_bssid, ETH_ALEN)) {
+				wrqu->freq.m = wx->bss[i].freq;
+				wrqu->freq.e = 6;
+				break;
+			}
+		}
+	}
+	mutex_unlock(&wx->lock);
+	return 0;
+}
+
+static int jedi_wx_giwrate(struct net_device *dev, struct iw_request_info *info,
+			   union iwreq_data *wrqu, char *extra)
+{
+	struct jedi_private *priv = netdev_priv(dev);
+
+	memset(&wrqu->bitrate, 0, sizeof(wrqu->bitrate));
+	mutex_lock(&priv->wx.lock);
+	wrqu->bitrate.value = priv->wx.rate_kbps * 1000;
+	mutex_unlock(&priv->wx.lock);
+	wrqu->bitrate.fixed = 0;
+	return 0;
+}
+
+static int jedi_wx_giwsens(struct net_device *dev, struct iw_request_info *info,
+			   union iwreq_data *wrqu, char *extra)
+{
+	memset(&wrqu->sens, 0, sizeof(wrqu->sens));
+	wrqu->sens.disabled = 1;
+	return 0;
+}
+
+/* Power save is not wired up yet; report it off, accept and ignore sets. */
+static int jedi_wx_siwpower(struct net_device *dev, struct iw_request_info *info,
+			    union iwreq_data *wrqu, char *extra)
+{
+	return 0;
+}
+
+static int jedi_wx_giwpower(struct net_device *dev, struct iw_request_info *info,
+			    union iwreq_data *wrqu, char *extra)
+{
+	memset(&wrqu->power, 0, sizeof(wrqu->power));
+	wrqu->power.disabled = 1;
+	return 0;
+}
+
+static int jedi_wx_giwtxpow(struct net_device *dev, struct iw_request_info *info,
+			    union iwreq_data *wrqu, char *extra)
+{
+	memset(&wrqu->txpower, 0, sizeof(wrqu->txpower));
+	wrqu->txpower.disabled = 1;	/* TODO: GET the TX power OID */
+	return 0;
+}
+
+static int jedi_wx_siwrts(struct net_device *dev, struct iw_request_info *info,
+			  union iwreq_data *wrqu, char *extra)
+{
+	struct jedi_private *priv = netdev_priv(dev);
+	u32 v = wrqu->rts.disabled ? 2347 : wrqu->rts.value;
+	int ret;
+
+	if (v > 2347)
+		return -EINVAL;
+	ret = jedi_set_u32(priv, JEDI_OID_RTS_THR, v);
+	if (!ret)
+		priv->wx.rts = v;
+	return ret;
+}
+
+static int jedi_wx_giwrts(struct net_device *dev, struct iw_request_info *info,
+			  union iwreq_data *wrqu, char *extra)
+{
+	struct jedi_private *priv = netdev_priv(dev);
+
+	wrqu->rts.value = priv->wx.rts ? priv->wx.rts : 2347;
+	wrqu->rts.disabled = wrqu->rts.value >= 2347;
+	wrqu->rts.fixed = 1;
+	return 0;
+}
+
+static int jedi_wx_siwfrag(struct net_device *dev, struct iw_request_info *info,
+			   union iwreq_data *wrqu, char *extra)
+{
+	struct jedi_private *priv = netdev_priv(dev);
+	u32 v = wrqu->frag.disabled ? 2346 : wrqu->frag.value;
+	int ret;
+
+	if (v < 256 || v > 2346)
+		return -EINVAL;
+	ret = jedi_set_u32(priv, JEDI_OID_FRAG_THR, v);
+	if (!ret)
+		priv->wx.frag = v;
+	return ret;
+}
+
+static int jedi_wx_giwfrag(struct net_device *dev, struct iw_request_info *info,
+			   union iwreq_data *wrqu, char *extra)
+{
+	struct jedi_private *priv = netdev_priv(dev);
+
+	wrqu->frag.value = priv->wx.frag ? priv->wx.frag : 2346;
+	wrqu->frag.disabled = wrqu->frag.value >= 2346;
+	wrqu->frag.fixed = 1;
+	return 0;
+}
+
 static struct iw_statistics *jedi_wx_get_stats(struct net_device *dev)
 {
 	struct jedi_private *priv = netdev_priv(dev);
@@ -1559,6 +2075,16 @@ static const iw_handler jedi_wx_handlers[] = {
 	IW_HANDLER(SIOCSIWMODE,		jedi_wx_siwmode),
 	IW_HANDLER(SIOCGIWMODE,		jedi_wx_giwmode),
 	IW_HANDLER(SIOCGIWRANGE,	jedi_wx_giwrange),
+	IW_HANDLER(SIOCGIWFREQ,		jedi_wx_giwfreq),
+	IW_HANDLER(SIOCGIWRATE,		jedi_wx_giwrate),
+	IW_HANDLER(SIOCGIWSENS,		jedi_wx_giwsens),
+	IW_HANDLER(SIOCSIWPOWER,	jedi_wx_siwpower),
+	IW_HANDLER(SIOCGIWPOWER,	jedi_wx_giwpower),
+	IW_HANDLER(SIOCGIWTXPOW,	jedi_wx_giwtxpow),
+	IW_HANDLER(SIOCSIWRTS,		jedi_wx_siwrts),
+	IW_HANDLER(SIOCGIWRTS,		jedi_wx_giwrts),
+	IW_HANDLER(SIOCSIWFRAG,		jedi_wx_siwfrag),
+	IW_HANDLER(SIOCGIWFRAG,		jedi_wx_giwfrag),
 	IW_HANDLER(SIOCSIWAP,		jedi_wx_siwap),
 	IW_HANDLER(SIOCGIWAP,		jedi_wx_giwap),
 	IW_HANDLER(SIOCSIWMLME,		jedi_wx_siwmlme),
