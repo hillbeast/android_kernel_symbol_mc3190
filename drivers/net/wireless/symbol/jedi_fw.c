@@ -47,6 +47,10 @@
  */
 
 #include <linux/delay.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/vmalloc.h>
+#include <asm/uaccess.h>
 #include <linux/firmware.h>
 #include <linux/jiffies.h>
 #include <linux/mmc/sdio.h>
@@ -318,6 +322,7 @@ static int jedi_download_chunk(struct sdio_func *func,
 			dev_err(&func->dev,
 				"jedi_fw: chunk %u burst write failed at "
 				"offset %u/%u: %d\n", chunk_num, sent, len, ret);
+			jedi_dump_regs(func, "burst failure");
 			goto out;
 		}
 		sent += burst;
@@ -679,8 +684,122 @@ static int jedi_wait_fw_boot(struct sdio_func *func)
 }
 
 /* ------------------------------------------------------------------ */
+/* Firmware blob access                                                */
+/* ------------------------------------------------------------------ */
+
+static const char * const jedi_blob_dirs[] = {
+	"/system/etc/firmware/", "/etc/firmware/", "/vendor/firmware/",
+	"/lib/firmware/",
+};
+
+static int jedi_blob_read_file(struct sdio_func *func, const char *name,
+			       struct jedi_blob *b)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(jedi_blob_dirs); i++) {
+		char path[64];
+		struct file *f;
+		loff_t pos = 0, size;
+		mm_segment_t old_fs;
+		u8 *buf;
+		ssize_t n;
+
+		snprintf(path, sizeof(path), "%s%s", jedi_blob_dirs[i], name);
+		f = filp_open(path, O_RDONLY, 0);
+		if (IS_ERR(f))
+			continue;
+		size = i_size_read(f->f_path.dentry->d_inode);
+		if (size <= 0 || size > (8 << 20)) {
+			filp_close(f, NULL);
+			continue;
+		}
+		buf = vmalloc(size);
+		if (!buf) {
+			filp_close(f, NULL);
+			return -ENOMEM;
+		}
+		old_fs = get_fs();
+		set_fs(KERNEL_DS);
+		n = vfs_read(f, (char __user *)buf, size, &pos);
+		set_fs(old_fs);
+		filp_close(f, NULL);
+		if (n != size) {
+			vfree(buf);
+			continue;
+		}
+		b->buf = buf;
+		b->data = buf;
+		b->size = size;
+		dev_info(&func->dev, "jedi_fw: read %s directly (%zu bytes)\n",
+			 path, b->size);
+		return 0;
+	}
+	return -ENOENT;
+}
+
+int jedi_blob_get(struct sdio_func *func, const char *name,
+		  struct jedi_blob *b, bool prefer_file)
+{
+	int ret;
+
+	memset(b, 0, sizeof(*b));
+	if (prefer_file && !jedi_blob_read_file(func, name, b))
+		return 0;
+	ret = request_firmware(&b->fw, name, &func->dev);
+	if (!ret) {
+		b->data = b->fw->data;
+		b->size = b->fw->size;
+		return 0;
+	}
+	b->fw = NULL;
+	dev_warn(&func->dev, "jedi_fw: request_firmware(%s) failed: %d\n",
+		 name, ret);
+	if (!prefer_file && !jedi_blob_read_file(func, name, b))
+		return 0;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(jedi_blob_get);
+
+void jedi_blob_put(struct jedi_blob *b)
+{
+	if (b->fw)
+		release_firmware(b->fw);
+	if (b->buf)
+		vfree(b->buf);
+	memset(b, 0, sizeof(*b));
+}
+EXPORT_SYMBOL_GPL(jedi_blob_put);
+
+/* ------------------------------------------------------------------ */
 /* Main entry point                                                    */
 /* ------------------------------------------------------------------ */
+
+#define JEDI_FW_LOAD_TRIES	5
+
+/* Walk the chunk list without touching the chip: every chunk header must fit
+ * and every chunk must end inside the file, and the last must end exactly at
+ * its end. */
+static int jedi_fw_validate(struct sdio_func *func, const struct jedi_blob *fw)
+{
+	const u8 *pos = fw->data, *end = fw->data + fw->size;
+	unsigned int n = 0;
+
+	while (pos < end) {
+		const struct jedi_fw_chunk *c;
+		u32 len;
+
+		if ((size_t)(end - pos) < sizeof(*c))
+			return -EINVAL;
+		c = (const struct jedi_fw_chunk *)pos;
+		len = le32_to_cpu(c->length);
+		if (len > (size_t)(end - pos) - sizeof(*c))
+			return -EINVAL;
+		pos += sizeof(*c) + len;
+		n++;
+	}
+	return n ? 0 : -EINVAL;
+}
 
 /*
  * jedi_fw_download() - reset the chip into its boot ROM, push the full
@@ -695,18 +814,43 @@ static int jedi_wait_fw_boot(struct sdio_func *func)
  */
 int jedi_fw_download(struct sdio_func *func)
 {
-	const struct firmware *fw;
+	struct jedi_blob fwb, *fw = &fwb;
+	bool have = false;
 	const u8 *pos, *end;
-	unsigned int chunk_num = 0;
+	unsigned int chunk_num = 0, try;
 	int ret;
 
-	ret = request_firmware(&fw, JEDI_FW_NAME, &func->dev);
-	if (ret) {
-		dev_err(&func->dev,
-			"jedi_fw: request_firmware(%s) failed: %d\n",
-			JEDI_FW_NAME, ret);
-		return ret;
+	/*
+	 * Android runs ueventd next to whatever Buildroot's hotplug helper is
+	 * still set; two firmware loaders racing on the same request produce an
+	 * image with garbage in it ("firmware_loading_store: unexpected value
+	 * (0)"). The chip has not been touched yet, so check the container and
+	 * simply ask for the image again if it is damaged.
+	 */
+	for (try = 0; try < JEDI_FW_LOAD_TRIES; try++) {
+		/* Read the file ourselves first; the firmware loader is the
+		 * fallback (it is the unreliable one on Android). */
+		ret = jedi_blob_get(func, JEDI_FW_NAME, fw, true);
+		if (ret) {
+			dev_err(&func->dev,
+				"jedi_fw: cannot load %s: %d\n",
+				JEDI_FW_NAME, ret);
+			return ret;
+		}
+		if (!jedi_fw_validate(func, fw)) {
+			have = true;
+			break;
+		}
+		dev_warn(&func->dev,
+			 "jedi_fw: firmware image is damaged (try %u/%u), "
+			 "loading it again\n", try + 1, JEDI_FW_LOAD_TRIES);
+		print_hex_dump(KERN_WARNING, "jedi_fw: head ", DUMP_PREFIX_OFFSET,
+			       16, 1, fw->data, min_t(size_t, fw->size, 32), false);
+		jedi_blob_put(fw);
+		msleep(500);
 	}
+	if (!have)
+		return -EINVAL;
 
 	pos = fw->data;
 	end = fw->data + fw->size;
@@ -777,7 +921,7 @@ int jedi_fw_download(struct sdio_func *func)
 
 out:
 	sdio_release_host(func);
-	release_firmware(fw);
+	jedi_blob_put(fw);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(jedi_fw_download);

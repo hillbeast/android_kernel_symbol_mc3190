@@ -59,8 +59,8 @@
 #define JEDI_DEVSTAT_RESET	    0x10000000
 #define JEDI_DEVSTAT_RAMBOOT	0x20000000
 
-/* Verbose logging: boot the kernel with symbol.debug=1, or at runtime
- * echo 1 > /sys/module/symbol/parameters/debug */
+/* Verbose logging: boot the kernel with jedi.debug=1, or at runtime
+ * echo 1 > /sys/module/jedi/parameters/debug */
 extern bool jedi_debug;
 
 #define jedi_dbg(func, fmt, ...)					\
@@ -75,5 +75,24 @@ int jedi_reg_write(struct sdio_func *func, u32 addr, unsigned int n, u32 val);
 
 /* Reset the chip into its boot ROM, upload firmware, wait for FW Init. */
 extern int jedi_fw_download(struct sdio_func *func);
+
+
+/*
+ * A firmware-type blob that can come from the kernel's firmware loader
+ * (ueventd / hotplug helper) or, when that fails, straight from the
+ * file system. Android's ueventd answers the first request after boot with
+ * -ENOENT or a damaged image; reading the file directly never depends on it.
+ */
+struct firmware;
+struct sdio_func;
+struct jedi_blob {
+	const struct firmware *fw;	/* set when it came from request_firmware */
+	void *buf;			/* set when it was read from a file */
+	const u8 *data;
+	size_t size;
+};
+int jedi_blob_get(struct sdio_func *func, const char *name,
+		  struct jedi_blob *b, bool prefer_file);
+void jedi_blob_put(struct jedi_blob *b);
 
 #endif // SYMBOL_JEDI_H
