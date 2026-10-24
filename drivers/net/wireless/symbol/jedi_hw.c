@@ -123,7 +123,7 @@ static int jedi_hw_regulatory(struct jedi_private *priv)
 	/* R16.2: begin download. Clears the MLME lock and the tables-supplied
 	 * flag, stops the MLME; SET 0x1f00000e fails without it once locked. */
 	ret = jedi_set_u32(priv, JEDI_OID_REG_BEGIN, 0);
-	dev_info(&func->dev, "jedi: SET 0x10 = 0 (regulatory begin): %d\n", ret);
+	jedi_dbg(func, "SET 0x10 = 0 (regulatory begin): %d\n", ret);
 	/* Its handler resets state and stops the MLME; with debug=0 the next
 	 * SET arrives ~1 ms later, so let it settle first. */
 	msleep(20);
@@ -148,7 +148,7 @@ static int jedi_hw_regulatory(struct jedi_private *priv)
 			n_blobs = get_unaligned_le16(p + 6);
 			p += 8;
 			hdr = 4;
-			dev_info(&func->dev, "jedi: jedi_reg.bin: JREG, %u blobs\n",
+			jedi_dbg(func, "jedi_reg.bin: JREG, %u blobs\n",
 				 n_blobs);
 		}
 legacy:
@@ -165,8 +165,8 @@ legacy:
 				break;
 			}
 			ret = jedi_reg_send(priv, p, len);
-			dev_info(&func->dev,
-				 "jedi: regulatory blob %d (%u bytes): %d\n",
+			jedi_dbg(func,
+				 "regulatory blob %d (%u bytes): %d\n",
 				 sent, len, ret);
 			sent++;
 			p += len;
@@ -193,7 +193,7 @@ legacy:
 		};
 
 		ret = jedi_reg_send(priv, rec, sizeof(rec));
-		dev_info(&func->dev, "jedi: regulatory TEST row: %d\n", ret);
+		jedi_dbg(func, "regulatory TEST row: %d\n", ret);
 		if (!ret)
 			sent = 1;
 	} else {
@@ -243,7 +243,7 @@ static void jedi_hw_country(struct jedi_private *priv)
 		memcpy(b, jedi_country, 3);
 	}
 	ret = jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_COUNTRY, b, 4, NULL, 0, NULL);
-	dev_info(&priv->func->dev, "jedi: country %s: %d\n", jedi_country, ret);
+	jedi_dbg(priv->func, "country %s: %d\n", jedi_country, ret);
 }
 
 /* GET 0x1f000002: current country, then the 4-byte entries it accepts. */
@@ -256,11 +256,11 @@ static void jedi_hw_log_countries(struct jedi_private *priv)
 		return;
 	if (!jedi_cmd(priv, JEDI_OP_GET, JEDI_OID_COUNTRY, NULL, 0x104, b, 0x104,
 		      &got))
-		dev_info(&priv->func->dev,
-			 "jedi: country '%.4s', %u bytes (%u accepted)\n", b, got,
+		jedi_dbg(priv->func,
+			 "country '%.4s', %u bytes (%u accepted)\n", b, got,
 			 got > 4 ? (got - 4) / 4 : 0);
 	if (jedi_debug && got)
-		print_hex_dump_bytes("jedi: countries ", DUMP_PREFIX_OFFSET, b,
+		jedi_hexdump("jedi: countries ", DUMP_PREFIX_OFFSET, b,
 				     min_t(u32, got, 64));
 	kfree(b);
 }
@@ -287,7 +287,7 @@ static void jedi_uart_poll(struct jedi_private *priv, const char *tag)
 		sdio_release_host(func);
 		return;
 	}
-	dev_info(&func->dev, "jedi: uart[%s] HOST_INT=0x%04x\n", tag, hi);
+	jedi_dbg(func, "uart[%s] HOST_INT=0x%04x\n", tag, hi);
 	for (i = 0; (hi & 0x8000) && i < 4096; i++) {
 		u8 c = sdio_readb(func, JEDI_REG_TX_LEN, &ret);
 
@@ -296,7 +296,7 @@ static void jedi_uart_poll(struct jedi_private *priv, const char *tag)
 		jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 2, 0x8000);
 		if (c == '\n' || n == sizeof(line) - 1) {
 			line[n] = 0;
-			dev_info(&func->dev, "jedi: fwlog: %s\n", line);
+			jedi_dbg(func, "fwlog: %s\n", line);
 			n = 0;
 			if (c == '\n')
 				goto next;
@@ -310,7 +310,7 @@ next:
 	}
 	if (n) {
 		line[n] = 0;
-		dev_info(&func->dev, "jedi: fwlog: %s\n", line);
+		jedi_dbg(func, "fwlog: %s\n", line);
 	}
 	sdio_release_host(func);
 }
@@ -392,7 +392,7 @@ void jedi_hw_init(struct jedi_private *priv)
 		jedi_dbg(priv->func, "0x10000003 (MLME state) = 0x%x\n",
 			 get_unaligned_le32(b));
 	if (!jedi_init_get(priv, 0x1400000d, 64, b, &got))
-		print_hex_dump_bytes("jedi: chanlist ", DUMP_PREFIX_OFFSET, b,
+		jedi_hexdump("jedi: chanlist ", DUMP_PREFIX_OFFSET, b,
 				     min_t(u32, got, 64));
 	jedi_hw_log_countries(priv);	/* after the MLME rebuilt the tables */
 	jedi_uart_poll(priv, "after-wait");
@@ -414,8 +414,8 @@ void jedi_hw_init(struct jedi_private *priv)
 		msleep(1000);
 		jedi_uart_poll(priv, "after-rebuild");
 		if (!jedi_init_get(priv, 0x1400000d, 256, b, &got)) {
-			dev_info(&priv->func->dev, "jedi: chanlist2: %u bytes\n", got);
-			print_hex_dump_bytes("jedi: chanlist2 ", DUMP_PREFIX_OFFSET,
+			jedi_dbg(priv->func, "chanlist2: %u bytes\n", got);
+			jedi_hexdump("jedi: chanlist2 ", DUMP_PREFIX_OFFSET,
 					     b, min_t(u32, got, 256));
 		}
 		jedi_hw_log_countries(priv);
@@ -424,7 +424,7 @@ void jedi_hw_init(struct jedi_private *priv)
 	if (!jedi_init_get(priv, JEDI_OID_SUPP_FREQS, 258, b, &got)) {
 		jedi_dbg(priv->func, "supported frequencies: %u bytes\n", got);
 		if (jedi_debug)
-			print_hex_dump_bytes("jedi: freqs ", DUMP_PREFIX_OFFSET,
+			jedi_hexdump("jedi: freqs ", DUMP_PREFIX_OFFSET,
 					     b, min_t(u32, got, 64));
 	}
 	if (!jedi_init_get(priv, JEDI_OID_MAX_SBSPECS, 8, b, &got) && got == 8)
@@ -520,6 +520,14 @@ static void jedi_parse_bss(struct jedi_private *priv, const u8 *e, u32 len)
 	else
 		freq = 5000 + 5 * ch;
 
+	if (jedi_bss_dump && body_len >= 12) {
+		jedi_dbg(priv->func,
+			 "bss %pM \"%.*s\" ch %u %d dBm caps 0x%04x, %u IE bytes\n",
+			 e, ssid_len, e + 0x0f, ch, (s8)e[0x0d], caps,
+			 body_len - 12);
+		jedi_hexdump("jedi: bssie ", DUMP_PREFIX_OFFSET, ies,
+				     body_len - 12);
+	}
 	jedi_wext_bss_add(priv, e, e + 0x0f, ssid_len, freq, (s8)e[0x0d], caps,
 			  ies, ies_len);
 	if (body_len >= 12) {
@@ -579,7 +587,7 @@ void jedi_scan_work(struct work_struct *work)
 		if (!got)
 			break;
 		if (jedi_debug && i == 0)
-			print_hex_dump_bytes("jedi: bss0 ", DUMP_PREFIX_OFFSET,
+			jedi_hexdump("jedi: bss0 ", DUMP_PREFIX_OFFSET,
 					     e, min_t(u32, got, 128));
 		jedi_parse_bss(priv, e, got);
 	}
@@ -717,7 +725,7 @@ void jedi_hw_port_authorize(struct jedi_private *priv, bool authorized)
 	mutex_lock(&priv->wx.lock);
 	memcpy(b, priv->wx.cur_bssid, ETH_ALEN);
 	mutex_unlock(&priv->wx.lock);
-	dev_info(&priv->func->dev, "jedi: port authorise 0x%08x bssid %pM\n",
+	jedi_dbg(priv->func, "port authorise 0x%08x bssid %pM\n",
 		 jedi_port_oid, b);
 	jedi_cmd(priv, JEDI_OP_SET, jedi_port_oid, b, sizeof(b), NULL, 0, NULL);
 }
@@ -850,17 +858,17 @@ static void jedi_hw_join_prepare(struct jedi_private *priv, u32 code, bool wpa,
 			break;
 		if (wait_for_completion_timeout(&priv->country_done,
 				msecs_to_jiffies(jedi_country_wait_ms))) {
-			dev_info(&priv->func->dev, "jedi: regulatory trap seen (try %d)\n", i);
+			jedi_dbg(priv->func, "regulatory trap seen (try %d)\n", i);
 			break;
 		}
-		dev_info(&priv->func->dev, "jedi: no regulatory trap after %u ms (try %d)\n",
+		jedi_dbg(priv->func, "no regulatory trap after %u ms (try %d)\n",
 			 jedi_country_wait_ms, i);
 	}
 	msleep(jedi_join_settle_ms);
 
 	if (!jedi_cmd(priv, JEDI_OP_GET, JEDI_OID_COUNTRY, NULL, sizeof(country),
 		      country, sizeof(country), &got) && got >= 3)
-		dev_info(&priv->func->dev, "jedi: country now \"%.3s\"\n",
+		jedi_dbg(priv->func, "country now \"%.3s\"\n",
 			 country);
 
 	key[10] = 8;
@@ -887,7 +895,7 @@ static void jedi_hw_join_prepare(struct jedi_private *priv, u32 code, bool wpa,
 	 * unless an earlier join changed it. */
 	if (jedi_wmm_mode >= 0)
 		wmm = jedi_wmm_mode;
-	dev_info(&priv->func->dev, "jedi: join setup: suite %u%s wpa %d wmm %d dummy_keys %d\n",
+	jedi_dbg(priv->func, "join setup: suite %u%s wpa %d wmm %d dummy_keys %d\n",
 		 code, jedi_send_suite ? "" : " (not sent)", wpa, wmm, jedi_dummy_keys);
 	if (jedi_send_suite && (code != 1 || (priv->wx.suite_sent && priv->wx.suite_sent != 1))) {
 		jedi_set_u32(priv, JEDI_OID_SECURITY, code);
@@ -974,8 +982,8 @@ void jedi_join_work(struct work_struct *work)
 			continue;
 		st = get_unaligned_le32(b);
 		if (st != last) {
-			dev_info(&priv->func->dev,
-				 "jedi: join state %u after %d ms\n", st,
+			jedi_dbg(priv->func,
+				 "join state %u after %d ms\n", st,
 				 (i + 1) * 250);
 			last = st;
 		}
@@ -1024,7 +1032,7 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 			 w0 ? "UP" : "DOWN", w0, w1, rate,
 			 jiffies_to_msecs(jiffies - priv->join_jiffies));
 		/* the layout is not fully known: always show it */
-		print_hex_dump_bytes("jedi: linkstate ",
+		jedi_hexdump("jedi: linkstate ",
 					     DUMP_PREFIX_OFFSET, p,
 					     min_t(u32, plen, 0x30));
 		if (w0) {
@@ -1055,7 +1063,7 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 	case JEDI_OID_DISASSOC_TRAP:
 		dev_info(&func->dev, "jedi: deauth/disassoc trap 0x%08x, reason %u\n",
 			 oid, plen >= 0x12 ? get_unaligned_le16(p + 0x10) : 0);
-		print_hex_dump_bytes("jedi: mlme ", DUMP_PREFIX_OFFSET, p,
+		jedi_hexdump("jedi: mlme ", DUMP_PREFIX_OFFSET, p,
 				     min_t(u32, plen, 0x40));
 		jedi_wext_link_event(priv, NULL);
 		schedule_work(&priv->clearkeys_work);
@@ -1091,8 +1099,8 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 	case JEDI_OID_AUTH_TRAP:
 	case JEDI_OID_REASSOC_TRAP:
 		/* RE Q5: payload layouts undecoded; show them whatever debug is */
-		dev_info(&func->dev, "jedi: mlme trap 0x%08x, %u bytes\n", oid, plen);
-		print_hex_dump_bytes("jedi: mlme ", DUMP_PREFIX_OFFSET, p,
+		jedi_dbg(func, "mlme trap 0x%08x, %u bytes\n", oid, plen);
+		jedi_hexdump("jedi: mlme ", DUMP_PREFIX_OFFSET, p,
 				     min_t(u32, plen, 0x40));
 		break;
 	default:
@@ -1108,7 +1116,7 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 				char line[80];
 
 				priv->diag_dump = false;
-				dev_info(&func->dev, "jedi: stats trap %u bytes (non-zero rows)\n", plen);
+				jedi_dbg(func, "stats trap %u bytes (non-zero rows)\n", plen);
 				for (off = 0; off < plen; off += 16) {
 					u32 n = min_t(u32, 16, plen - off), k;
 
@@ -1118,7 +1126,7 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 						continue;
 					hex_dump_to_buffer(p + off, n, 16, 1, line,
 							   sizeof(line), false);
-					dev_info(&func->dev, "jedi: stats +%04x: %s\n", off, line);
+					jedi_dbg(func, "stats +%04x: %s\n", off, line);
 				}
 			}
 			if (plen < 0x18)
@@ -1134,8 +1142,8 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 			break;
 		}
 		/* anything else unexpected is shown regardless of debug */
-		dev_info(&func->dev, "jedi: trap 0x%08x, %u bytes\n", oid, plen);
-		print_hex_dump_bytes("jedi: trap ", DUMP_PREFIX_OFFSET, p,
+		jedi_dbg(func, "trap 0x%08x, %u bytes\n", oid, plen);
+		jedi_hexdump("jedi: trap ", DUMP_PREFIX_OFFSET, p,
 				     min_t(u32, plen, 0x40));
 		break;
 	}

@@ -240,6 +240,7 @@ extern unsigned int jedi_port_oid;
 extern bool jedi_bssid_lock;
 extern bool jedi_tx_gate;
 extern bool jedi_key_dump;
+extern bool jedi_bss_dump;
 extern unsigned int jedi_country_wait_ms;
 extern unsigned int jedi_rsc_mode;
 extern unsigned int jedi_key_remove_mode;

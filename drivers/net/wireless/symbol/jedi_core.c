@@ -31,7 +31,7 @@ bool jedi_reg_test;
 module_param_named(reg_test, jedi_reg_test, bool, 0444);
 MODULE_PARM_DESC(reg_test, "Experiment: send a guessed 2.4 GHz regulatory row (R15)");
 
-char *jedi_country;
+char *jedi_country = "NZ";
 module_param_named(country, jedi_country, charp, 0444);
 
 /* R18.7: after init, flip the band mask and restart the MLME to force a rebuild. */
@@ -61,9 +61,9 @@ MODULE_PARM_DESC(suite, "Force the 0x1200000b suite code (0 = automatic)");
 unsigned int jedi_join_mode = 3;
 module_param_named(join_mode, jedi_join_mode, uint, 0644);
 MODULE_PARM_DESC(join_mode, "3 = WinCE sequence (default), 0 = BSSID then SSID, 1 = SSID only, 2 = SSID then BSSID");
-bool jedi_dot11d = true;
+bool jedi_dot11d = false;
 module_param_named(dot11d, jedi_dot11d, bool, 0644);
-MODULE_PARM_DESC(dot11d, "802.11d: let the firmware adopt the country seen in beacons (default on, as WinCE). 0 keeps jedi.country fixed");
+MODULE_PARM_DESC(dot11d, "802.11d: let the firmware adopt the country seen in beacons (default OFF here: with it on the firmware flips between NZ/US/AU/CN and some joins fail). 0 keeps jedi.country fixed");
 unsigned int jedi_join_settle_ms = 500;
 module_param_named(join_settle_ms, jedi_join_settle_ms, uint, 0644);
 MODULE_PARM_DESC(join_settle_ms, "join_mode 3: pause after the disconnect SSID and after the regulatory refresh (WinCE: ~3300; 0 and 250 fail, 500 works; default 500)");
@@ -105,12 +105,15 @@ MODULE_PARM_DESC(key_remove, "Key removal: 1 = 0x1200000a record with type byte 
 unsigned int jedi_rsc_mode = 1;
 module_param_named(rsc_mode, jedi_rsc_mode, uint, 0644);
 MODULE_PARM_DESC(rsc_mode, "Key receive counter: 0 = as supplied (LE), 1 = zero (default), 2 = byte-reversed");
-unsigned int jedi_country_wait_ms = 4000;
+unsigned int jedi_country_wait_ms = 0;
 module_param_named(country_wait, jedi_country_wait_ms, uint, 0644);
 MODULE_PARM_DESC(country_wait, "Max ms to wait for the regulatory-change trap (0x1f000003) after a join's commit (0 = fixed delay only)");
-bool jedi_key_dump = true;
+bool jedi_bss_dump = true;
+module_param_named(bss_dump, jedi_bss_dump, bool, 0644);
+MODULE_PARM_DESC(bss_dump, "Log every scanned BSS with its full information elements (debug)");
+bool jedi_key_dump;
 module_param_named(key_dump, jedi_key_dump, bool, 0644);
-MODULE_PARM_DESC(key_dump, "Log the raw 64-byte key records (INCLUDES KEY MATERIAL; test networks only)");
+MODULE_PARM_DESC(key_dump, "Log the raw 64-byte key records (INCLUDES KEY MATERIAL; only with jedi.debug=1, test networks only)");
 bool jedi_tx_gate = true;
 module_param_named(tx_gate, jedi_tx_gate, bool, 0644);
 MODULE_PARM_DESC(tx_gate, "Drop non-EAPOL frames until the WPA port is authorised (default on)");
@@ -192,6 +195,9 @@ static void jedi_diag_work(struct work_struct *work)
 	struct sdio_func *func = priv->func;
 	char tag[64];
 
+	if (!jedi_debug)
+		return;
+
 	if (priv->diag_n == 4)
 		priv->diag_dump = true;
 	sdio_claim_host(func);
@@ -207,6 +213,8 @@ static void jedi_diag_work(struct work_struct *work)
 void jedi_diag_start(struct jedi_private *priv)
 {
 	cancel_delayed_work_sync(&priv->diag_work);
+	if (!jedi_debug)
+		return;
 	priv->diag_n = 0;
 	priv->diag_dump = true;
 	schedule_delayed_work(&priv->diag_work, HZ / 4);
@@ -253,7 +261,7 @@ static void jedi_tx_snapshot(struct jedi_private *priv, const char *tag, bool er
 		 tag, st, hi, txl, rxl, dev, f0, e1, e2, e3, e4, e5, e6);
 	if (err)
 		dev_err(&func->dev, "%s\n", msg);
-	else
+	else if (jedi_debug)
 		dev_info(&func->dev, "%s\n", msg);
 }
 
@@ -517,13 +525,13 @@ int jedi_cmd(struct jedi_private *priv, u8 op, u32 oid,
 void jedi_trace_data(struct jedi_private *priv, const char *dir,
 		     const u8 *buf, u32 len)
 {
-	if (priv->data_traced >= jedi_data_trace)
+	if (!jedi_debug || priv->data_traced >= jedi_data_trace)
 		return;
 	priv->data_traced++;
-	dev_info(&priv->func->dev,
-		 "jedi: data %s %u bytes, dst %pM src %pM type 0x%04x\n", dir,
+	jedi_dbg(priv->func,
+		 "data %s %u bytes, dst %pM src %pM type 0x%04x\n", dir,
 		 len, buf, buf + 6, len >= 14 ? (buf[12] << 8) | buf[13] : 0);
-	print_hex_dump_bytes("jedi: data ", DUMP_PREFIX_OFFSET, buf,
+	jedi_hexdump("jedi: data ", DUMP_PREFIX_OFFSET, buf,
 			     min_t(u32, len, 64));
 }
 
@@ -1169,6 +1177,17 @@ static void jedi_remove(struct sdio_func *func)
 			sdio_release_irq(func);
 		sdio_release_host(func);
 		priv->irq_claimed = false;
+		/*
+		 * Traps that arrived while the radio was being shut down (the
+		 * link-down trap in particular) have queued work items; with
+		 * the IRQ gone nothing can queue more, so cancel them for good
+		 * before priv is freed (otherwise they run on freed memory).
+		 */
+		cancel_delayed_work_sync(&priv->scan_work);
+		cancel_work_sync(&priv->link_work);
+		cancel_work_sync(&priv->clearkeys_work);
+		cancel_delayed_work_sync(&priv->diag_work);
+		cancel_delayed_work_sync(&priv->join_work);
 		/* Wi-Fi off: stop the firmware (boot ROM idle), keep the card */
 		if (jedi_fw_halt(func))
 			dev_warn(&func->dev, "jedi: could not park the chip\n");

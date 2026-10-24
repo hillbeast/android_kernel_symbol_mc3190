@@ -69,6 +69,13 @@ extern bool jedi_debug;
 			dev_info(&(func)->dev, "jedi: " fmt, ##__VA_ARGS__); \
 	} while (0)
 
+/* Hex dumps only when jedi.debug=1 (same signature as print_hex_dump_bytes). */
+#define jedi_hexdump(prefix, ptype, buf, len)				\
+	do {								\
+		if (jedi_debug)						\
+			print_hex_dump_bytes(prefix, ptype, buf, len);	\
+	} while (0)
+
 /* CMD52 register helpers, defined in jedi_fw.c. n = 1..4 bytes. */
 int jedi_reg_read(struct sdio_func *func, u32 addr, unsigned int n, u32 *val);
 int jedi_reg_write(struct sdio_func *func, u32 addr, unsigned int n, u32 val);

@@ -731,6 +731,7 @@ static int jedi_blob_read_file(struct sdio_func *func, const char *name,
 		b->buf = buf;
 		b->data = buf;
 		b->size = size;
+		if (jedi_debug)
 		dev_info(&func->dev, "jedi_fw: read %s directly (%zu bytes)\n",
 			 path, b->size);
 		return 0;
@@ -855,7 +856,8 @@ int jedi_fw_download(struct sdio_func *func)
 	pos = fw->data;
 	end = fw->data + fw->size;
 
-	dev_info(&func->dev, "jedi_fw: downloading firmware (%zu bytes)\n",
+	if (jedi_debug)
+		dev_info(&func->dev, "jedi_fw: downloading firmware (%zu bytes)\n",
 		 fw->size);
 	jedi_dbg(func, "func1 max_blksize=%u cur_blksize=%u\n",
 		 func->max_blksize, func->cur_blksize);

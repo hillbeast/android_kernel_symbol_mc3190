@@ -631,7 +631,7 @@ static int jedi_install_sta_key(struct jedi_private *priv, const u8 *mac,
 		}
 	}
 	if (jedi_key_dump)
-		print_hex_dump_bytes("jedi: keyrec ", DUMP_PREFIX_OFFSET, b, 64);
+		jedi_hexdump("jedi: keyrec ", DUMP_PREFIX_OFFSET, b, 64);
 	return jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_STA_KEY_RSC, b, 64,
 			NULL, 0, NULL);
 }
@@ -652,7 +652,7 @@ int jedi_key_remove(struct jedi_private *priv, const u8 *mac, int idx)
 	b[10] = 8;
 	memcpy(b + 44, mac, ETH_ALEN);
 	b[52] = idx;
-	dev_info(&priv->func->dev, "jedi: remove key idx %d for %pM\n", idx, mac);
+	jedi_dbg(priv->func, "remove key idx %d for %pM\n", idx, mac);
 	return jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_STA_KEY_RSC, b, 64, NULL, 0,
 			NULL);
 }
@@ -755,7 +755,7 @@ static int jedi_wx_siwencodeext(struct net_device *dev,
 		flush_work(&priv->tx_work);
 		msleep(jedi_ptk_delay_ms);
 	}
-	dev_info(&priv->func->dev, "jedi: install %s key idx %d type %u len %d tx %d rsc %d for %pM\n",
+	jedi_dbg(priv->func, "install %s key idx %d type %u len %d tx %d rsc %d for %pM\n",
 		 group ? "group" : "pairwise", idx, type, keylen, tx,
 		 !!(ext->ext_flags & IW_ENCODE_EXT_RX_SEQ_VALID), mac);
 	ret = jedi_install_sta_key(priv, mac, idx, type, tkbuf, keylen, tx,
