@@ -39,6 +39,9 @@ struct mc3190_bl_platform_data {
  */
 
 extern void mc3190_panel_set_power(int on);
+extern void mc3190_wifi_power_on(void);
+extern void mc3190_wifi_power_off(void);
+extern void mc3190_wifi_power_cycle(void);
 
 /*
  * Board specific IRQs/Virtual IRQs

@@ -522,6 +522,19 @@ static void jedi_parse_bss(struct jedi_private *priv, const u8 *e, u32 len)
 
 	jedi_wext_bss_add(priv, e, e + 0x0f, ssid_len, freq, (s8)e[0x0d], caps,
 			  ies, ies_len);
+	if (body_len >= 12) {
+		/* WMM: vendor IE 00:50:f2 type 2 (WinCE: 0x13000108 follows it) */
+		u32 p = 0, n = body_len - 12;
+		bool wmm = false;
+
+		while (p + 2 <= n && p + 2 + ies[p + 1] <= n) {
+			if (ies[p] == 221 && ies[p + 1] >= 4 &&
+			    !memcmp(ies + p + 2, "\x00\x50\xf2\x02", 4))
+				wmm = true;
+			p += 2 + ies[p + 1];
+		}
+		jedi_bss_set_wmm(priv, e, wmm);
+	}
 }
 
 void jedi_scan_work(struct work_struct *work)
@@ -684,16 +697,29 @@ static void jedi_hw_set_privacy(struct jedi_private *priv, bool on)
 	jedi_set_u32(priv, 0x12000002, on);
 }
 
-/* TODO(RE Q4): 802.1X port control. The OID is unknown; jedi.port_oid lets
- * a candidate be tried. Called with true after the pairwise key is
- * installed and false on disconnect. No-op while port_oid is 0. */
+/*
+ * 802.1X port authorise (WPA2 capture): after the 4-way handshake WinCE sends
+ * PTK, GTK (0x1200000a) and then SET 0x150007e4 = BSSID + 2 zero bytes.
+ * Nothing is known about a "close" command; a disconnect is a bogus SSID.
+ */
 void jedi_hw_port_authorize(struct jedi_private *priv, bool authorized)
 {
+	u8 b[8] = { 0 };
+
+	if (!authorized) {
+		priv->wx.ptk_set = priv->wx.gtk_set = false;
+		return;
+	}
+	priv->port_closed = false;
+	jedi_diag_start(priv);
 	if (!jedi_port_oid)
 		return;
-	dev_info(&priv->func->dev, "jedi: port control 0x%08x = %d\n",
-		 jedi_port_oid, authorized);
-	jedi_set_u32(priv, jedi_port_oid, authorized);
+	mutex_lock(&priv->wx.lock);
+	memcpy(b, priv->wx.cur_bssid, ETH_ALEN);
+	mutex_unlock(&priv->wx.lock);
+	dev_info(&priv->func->dev, "jedi: port authorise 0x%08x bssid %pM\n",
+		 jedi_port_oid, b);
+	jedi_cmd(priv, JEDI_OP_SET, jedi_port_oid, b, sizeof(b), NULL, 0, NULL);
 }
 
 static void jedi_hw_set_security(struct jedi_private *priv)
@@ -715,7 +741,39 @@ int jedi_hw_disassociate(struct jedi_private *priv)
 	jedi_dbg(priv->func, "disassociate\n");
 	jedi_hw_port_authorize(priv, false);
 	jedi_set_u32(priv, JEDI_OID_SECURITY, 1);
+	priv->wx.suite_sent = 1;
 	return jedi_hw_set_ssid_empty(priv);
+}
+
+/*
+ * The firmware encrypts every data frame, EAPOL included, once a pairwise
+ * key is installed. After a link loss (it re-associates on its own) the old
+ * key would encrypt message 2 of the next handshake, so wipe the key table
+ * (SET 0x12000008, type byte 8, as WinCE does at start).
+ */
+void jedi_clearkeys_work(struct work_struct *work)
+{
+	struct jedi_private *priv = container_of(work, struct jedi_private,
+						 clearkeys_work);
+	u8 key[44] = { 0 };
+
+	int i;
+
+	key[10] = 8;
+	priv->wx.ptk_set = priv->wx.gtk_set = false;
+	if (jedi_key_remove_mode) {
+		for (i = 0; i < 4; i++) {
+			u8 mac[ETH_ALEN];
+
+			if (!priv->wx.key[i].valid)
+				continue;
+			memcpy(mac, priv->wx.key[i].mac, ETH_ALEN);
+			jedi_key_remove(priv, mac, i);
+			priv->wx.key[i].valid = false;
+		}
+	}
+	jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_STA_KEY, key, sizeof(key), NULL, 0,
+		 NULL);
 }
 
 /* After a connect trap the BSSID is read with GET 0x10000001 (R9.1). */
@@ -757,7 +815,8 @@ void jedi_link_work(struct work_struct *work)
  * The firmware answers about 4 s later with traps 0x18000001 (auth),
  * 0x18000003 x2 (assoc request/response), then 0x00000001 (link up).
  */
-static void jedi_hw_join_prepare(struct jedi_private *priv)
+static void jedi_hw_join_prepare(struct jedi_private *priv, u32 code, bool wpa,
+				 bool wmm)
 {
 	static const u8 bogus[32] = {
 		1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
@@ -777,8 +836,26 @@ static void jedi_hw_join_prepare(struct jedi_private *priv)
 	jedi_init_set(priv, JEDI_OID_WWR_MODE, 3);
 	jedi_init_set(priv, JEDI_OID_DOT11D_MODE, jedi_dot11d);
 	jedi_init_set(priv, JEDI_OID_WWR_MODE, 3);
-	jedi_hw_reg_commit(priv);
-	jedi_hw_country(priv);		/* no-op unless jedi.country is set */
+	/*
+	 * The firmware applies the regulatory commit asynchronously and
+	 * announces the result with trap 0x1f000003. Joins that raced it read
+	 * back an empty or odd country and then never associated, so wait for
+	 * the trap (and retry the commit once if it never comes).
+	 */
+	for (i = 0; i < 2; i++) {
+		INIT_COMPLETION(priv->country_done);
+		jedi_hw_reg_commit(priv);
+		jedi_hw_country(priv);	/* no-op unless jedi.country is set */
+		if (!jedi_country_wait_ms)
+			break;
+		if (wait_for_completion_timeout(&priv->country_done,
+				msecs_to_jiffies(jedi_country_wait_ms))) {
+			dev_info(&priv->func->dev, "jedi: regulatory trap seen (try %d)\n", i);
+			break;
+		}
+		dev_info(&priv->func->dev, "jedi: no regulatory trap after %u ms (try %d)\n",
+			 jedi_country_wait_ms, i);
+	}
 	msleep(jedi_join_settle_ms);
 
 	if (!jedi_cmd(priv, JEDI_OP_GET, JEDI_OID_COUNTRY, NULL, sizeof(country),
@@ -793,11 +870,33 @@ static void jedi_hw_join_prepare(struct jedi_private *priv)
 	for (i = 4; i <= 7; i++)
 		jedi_cmd(priv, JEDI_OP_SET, 0x12000000 + i, slot, sizeof(slot),
 			 NULL, 0, NULL);
+	if (jedi_dummy_keys) {
+		/* WinCE: ff:ff:ff:ff:ff:ff, idx 0..3, type byte 1 (stack junk after) */
+		for (i = 0; i < 4; i++) {
+			memset(key, 0, sizeof(key));
+			memset(key, 0xff, ETH_ALEN);
+			key[8] = i;
+			key[10] = 1;
+			jedi_cmd(priv, JEDI_OP_SET, 0x12000008, key, sizeof(key),
+				 NULL, 0, NULL);
+		}
+	}
 	jedi_init_set(priv, JEDI_OID_BSS_TYPE, JEDI_BSS_INFRA);
+	/* WPA2 capture: the suite goes here, after 0x10000000, and sticks
+	 * in the firmware (WinCE sent it once). Open joins send nothing
+	 * unless an earlier join changed it. */
+	if (jedi_wmm_mode >= 0)
+		wmm = jedi_wmm_mode;
+	dev_info(&priv->func->dev, "jedi: join setup: suite %u%s wpa %d wmm %d dummy_keys %d\n",
+		 code, jedi_send_suite ? "" : " (not sent)", wpa, wmm, jedi_dummy_keys);
+	if (jedi_send_suite && (code != 1 || (priv->wx.suite_sent && priv->wx.suite_sent != 1))) {
+		jedi_set_u32(priv, JEDI_OID_SECURITY, code);
+		priv->wx.suite_sent = code;
+	}
 	jedi_init_set(priv, 0x150007e0, 0);
-	jedi_init_set(priv, 0x13000108, 0);
-	jedi_set_u32(priv, 0x12000001, 0);
-	jedi_set_u32(priv, 0x12000002, 0);
+	jedi_init_set(priv, 0x13000108, wmm ? 1 : 0);
+	jedi_set_u32(priv, 0x12000001, wpa ? 3 : 0);
+	jedi_set_u32(priv, 0x12000002, wpa ? 1 : 0);
 }
 
 /*
@@ -833,16 +932,22 @@ void jedi_join_work(struct work_struct *work)
 		 len, ssid, bssid, wx->bssid_set ? "locked" : "any");
 	if (jedi_join_mode == 3) {
 		bool wpa;
+		u32 code = jedi_suite_code(priv, &wpa);
 
-		jedi_hw_join_prepare(priv);
-		/* open network: WinCE sends no suite OIDs at all */
-		if (jedi_suite_code(priv, &wpa) != 1 || jedi_suite_override)
-			jedi_hw_set_security(priv);
+		if (jedi_suite_override)
+			code = jedi_suite_override;
+		priv->wx.ptk_set = priv->wx.gtk_set = false;
+		priv->wx.req_ie_len = priv->wx.resp_ie_len = 0;
+		priv->port_closed = wpa;
+		jedi_hw_join_prepare(priv, code, wpa, jedi_bss_wmm(priv, ssid, len));
 	} else {
+		priv->port_closed = false;
 		jedi_hw_set_security(priv);
 	}
 	switch (jedi_join_mode) {
 	case 3:			/* WinCE: SSID, then BSSID (zero = any) */
+		if (!jedi_bssid_lock)
+			memset(bssid, 0, ETH_ALEN);
 		jedi_hw_set_ssid(priv, ssid, len);
 		jedi_hw_set_bssid(priv, bssid);
 		break;
@@ -922,10 +1027,12 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 		print_hex_dump_bytes("jedi: linkstate ",
 					     DUMP_PREFIX_OFFSET, p,
 					     min_t(u32, plen, 0x30));
-		if (w0)
+		if (w0) {
 			schedule_work(&priv->link_work);
-		else
+		} else {
 			jedi_wext_link_event(priv, NULL);
+			schedule_work(&priv->clearkeys_work);
+		}
 		break;
 	}
 	case JEDI_OID_SCAN_DONE_TRAP:
@@ -951,9 +1058,37 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 		print_hex_dump_bytes("jedi: mlme ", DUMP_PREFIX_OFFSET, p,
 				     min_t(u32, plen, 0x40));
 		jedi_wext_link_event(priv, NULL);
+		schedule_work(&priv->clearkeys_work);
 		break;
-	case JEDI_OID_AUTH_TRAP:
 	case JEDI_OID_ASSOC_TRAP:
+		/* WPA2 capture: 20-byte header (BSSID, ..., u16 body length at
+		 * +18), then the 802.11 body. Request (cap, listen, IEs) is
+		 * the first trap, response (cap, status, AID, IEs) the second;
+		 * wpa_supplicant needs the request IEs for message 2. */
+		if (plen >= 24) {
+			u32 blen = get_unaligned_le16(p + 18);
+			const u8 *body = p + 20;
+			bool resp = priv->wx.req_ie_len != 0;
+			u32 skip = resp ? 6 : 4;
+
+			if (blen > plen - 20)
+				blen = plen - 20;
+			if (blen >= skip && blen - skip <= JEDI_MAX_IE) {
+				mutex_lock(&priv->wx.lock);
+				if (!resp) {
+					memcpy(priv->wx.req_ie, body + skip,
+					       blen - skip);
+					priv->wx.req_ie_len = blen - skip;
+				} else {
+					memcpy(priv->wx.resp_ie, body + skip,
+					       blen - skip);
+					priv->wx.resp_ie_len = blen - skip;
+				}
+				mutex_unlock(&priv->wx.lock);
+			}
+		}
+		/* fall through */
+	case JEDI_OID_AUTH_TRAP:
 	case JEDI_OID_REASSOC_TRAP:
 		/* RE Q5: payload layouts undecoded; show them whatever debug is */
 		dev_info(&func->dev, "jedi: mlme trap 0x%08x, %u bytes\n", oid, plen);
@@ -961,11 +1096,31 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 				     min_t(u32, plen, 0x40));
 		break;
 	default:
+		if (oid == 0x1f000003)
+			complete(&priv->country_done);
 		if (oid == 0x16000101) {
 			/* Statistics. Two counters at payload +0x10/+0x14 rise by
 			 * 1 per SSID SET and 2 per scan (RE Q5); log changes. */
 			u32 a, b;
 
+			if (priv->diag_dump) {
+				u32 off;
+				char line[80];
+
+				priv->diag_dump = false;
+				dev_info(&func->dev, "jedi: stats trap %u bytes (non-zero rows)\n", plen);
+				for (off = 0; off < plen; off += 16) {
+					u32 n = min_t(u32, 16, plen - off), k;
+
+					for (k = 0; k < n && !p[off + k]; k++)
+						;
+					if (k == n)
+						continue;
+					hex_dump_to_buffer(p + off, n, 16, 1, line,
+							   sizeof(line), false);
+					dev_info(&func->dev, "jedi: stats +%04x: %s\n", off, line);
+				}
+			}
 			if (plen < 0x18)
 				break;
 			a = get_unaligned_le32(p + 0x10);

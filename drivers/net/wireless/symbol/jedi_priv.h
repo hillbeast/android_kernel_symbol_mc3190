@@ -87,6 +87,7 @@ struct jedi_bss {
 	u16 freq;			/* MHz */
 	s8 level;			/* dBm */
 	u16 caps;			/* 802.11 capability info */
+	bool wmm;			/* advertises a WMM vendor IE */
 	u16 ie_len;
 	u8 ie[JEDI_MAX_BSS_IE];		/* concatenated WPA/RSN/etc IEs */
 };
@@ -108,6 +109,12 @@ struct jedi_wext {
 	struct iw_statistics stats;
 	u32 rate_kbps;			/* from the link-state trap */
 	u32 rts, frag;			/* last values written */
+	u8 req_ie[JEDI_MAX_IE];		/* assoc request IEs (0x18000003 trap) */
+	u8 req_ie_len;
+	u8 resp_ie[JEDI_MAX_IE];	/* assoc response IEs */
+	u8 resp_ie_len;
+	bool ptk_set, gtk_set;		/* keys installed since the join */
+	u32 suite_sent;			/* last 0x1200000b value (0 = unknown) */
 	struct {			/* last installed key per index, for removal */
 		bool valid;
 		u8 type, len;
@@ -135,11 +142,22 @@ struct jedi_private {
 	struct jedi_wext wx;
 	struct delayed_work scan_work;
 	struct work_struct link_work;	/* GET BSSID after a connect trap */
+	spinlock_t eapol_lock;		/* eapol_hold / eapol_ok */
+	struct sk_buff *eapol_hold;	/* AP message 1 that beat the AP event */
+	struct completion country_done;	/* 0x1f000003 trap seen */
+	struct delayed_work diag_work;
+	int diag_n;
+	bool diag_dump;		/* dump the next 0x16000101 trap in full */
+	unsigned long irq_cnt, irq_rx_cnt, rx_zero_cnt;
+	bool port_closed;		/* WPA join: only EAPOL may be sent */
+	bool eapol_ok;			/* supplicant has been told we are associated */
+	struct work_struct clearkeys_work; /* wipe stale keys after a link loss */
 	struct delayed_work join_work;	/* BSSID, then SSID (starts the join) */
 	char *cmd_out;		/* sysfs 'cmd' result */
 	bool stat_valid;		/* last 0x16000101 counters */
 	u32 stat_a, stat_b;
 	bool hw_failed;
+	unsigned int tx_stalls;		/* consecutive TX timeouts */
 	unsigned int data_traced;	/* data frames logged so far */
 	unsigned long join_jiffies;	/* when the last join was started */			/* init step failed: reset and retry */
 	unsigned int tx_traced;		/* TX frames logged so far */
@@ -159,6 +177,7 @@ struct jedi_private {
 #define JEDI_OID_STA_KEY	0x12000008	/* 44 bytes */
 #define JEDI_OID_STA_KEY_RSC	0x1200000a	/* 64 bytes */
 #define JEDI_OID_SECURITY	0x1200000b	/* suite code */
+#define JEDI_OID_PORT_AUTH	0x150007e4	/* 8 bytes: BSSID + 2 zero; after PTK+GTK */
 #define JEDI_OID_SEC_MODE	0x12000012	/* driver security mode */
 #define JEDI_OID_COUNTRY_LIST	0x1f000001
 #define JEDI_OID_COUNTRY	0x1f000002
@@ -218,9 +237,25 @@ extern unsigned int jedi_join_settle_ms;
 extern bool jedi_dot11d;
 extern bool jedi_send_privacy;
 extern unsigned int jedi_port_oid;
+extern bool jedi_bssid_lock;
+extern bool jedi_tx_gate;
+extern bool jedi_key_dump;
+extern unsigned int jedi_country_wait_ms;
+extern unsigned int jedi_rsc_mode;
+extern unsigned int jedi_key_remove_mode;
+int jedi_key_remove(struct jedi_private *priv, const u8 *mac, int idx);
+extern int jedi_wmm_mode;
+extern bool jedi_send_suite, jedi_dummy_keys;
 extern unsigned int jedi_data_trace;
 extern bool jedi_link_fallback;
 extern bool jedi_ps_kick;
+extern unsigned int jedi_recover_max;
+bool jedi_request_recovery(struct sdio_func *func, const char *why);
+/* Board hook (arch/arm/mach-pxa/mc3190.c); weak so the module still loads
+ * where it does not exist. */
+extern void mc3190_wifi_power_cycle(void) __attribute__((weak));
+extern void mc3190_wifi_power_on(void) __attribute__((weak));
+extern void mc3190_wifi_power_off(void) __attribute__((weak));
 void jedi_trace_data(struct jedi_private *priv, const char *dir,
 		     const u8 *buf, u32 len);
 extern unsigned int jedi_join_poll_ms;
@@ -241,15 +276,21 @@ int jedi_hw_disassociate(struct jedi_private *priv);
 void jedi_hw_init(struct jedi_private *priv);
 void jedi_hw_shutdown(struct jedi_private *priv);
 void jedi_hw_port_authorize(struct jedi_private *priv, bool authorized);
+void jedi_diag_start(struct jedi_private *priv);
 int jedi_hw_scan(struct jedi_private *priv, const u8 *ssid, u8 ssid_len);
 int jedi_hw_set_bssid(struct jedi_private *priv, const u8 *bssid);
 int jedi_hw_set_ssid(struct jedi_private *priv, const u8 *ssid, u8 len);
 void jedi_join_work(struct work_struct *work);
 void jedi_link_work(struct work_struct *work);
+void jedi_clearkeys_work(struct work_struct *work);
+void jedi_eapol_release(struct jedi_private *priv, bool ok);
+extern unsigned int jedi_ptk_delay_ms;
 void jedi_scan_work(struct work_struct *work);
 int jedi_set_u32(struct jedi_private *priv, u32 oid, u32 val);
 
 /* jedi_wext.c: wireless extensions */
+bool jedi_bss_wmm(struct jedi_private *priv, const u8 *ssid, u8 ssid_len);
+void jedi_bss_set_wmm(struct jedi_private *priv, const u8 *bssid, bool wmm);
 int jedi_wext_bss_add(struct jedi_private *priv, const u8 *bssid, const u8 *ssid, u8 ssid_len, u16 freq, s8 level, u16 caps, const u8 *ie, u16 ie_len);
 void jedi_wext_bss_clear(struct jedi_private *priv);
 void jedi_wext_link_event(struct jedi_private *priv, const u8 *bssid);

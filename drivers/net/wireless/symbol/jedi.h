@@ -75,6 +75,7 @@ int jedi_reg_write(struct sdio_func *func, u32 addr, unsigned int n, u32 val);
 
 /* Reset the chip into its boot ROM, upload firmware, wait for FW Init. */
 extern int jedi_fw_download(struct sdio_func *func);
+extern int jedi_fw_halt(struct sdio_func *func);
 
 
 /*

@@ -58,11 +58,43 @@ void jedi_wext_link_event(struct jedi_private *priv, const u8 *bssid)
 	}
 	mutex_unlock(&wx->lock);
 
-	if (bssid)
+	if (bssid) {
+		union iwreq_data iw;
+		u8 ie[JEDI_MAX_IE];
+		u8 len;
+
+		/* The firmware builds its own association IEs; the supplicant
+		 * must send exactly the same RSN IE in EAPOL message 2, so
+		 * hand them over (before SIOCGIWAP) as IWEVASSOCREQIE. */
+		mutex_lock(&wx->lock);
+		len = wx->req_ie_len;
+		memcpy(ie, wx->req_ie, len);
+		mutex_unlock(&wx->lock);
+		if (len) {
+			memset(&iw, 0, sizeof(iw));
+			iw.data.length = len;
+			wireless_send_event(priv->ndev, IWEVASSOCREQIE, &iw,
+					    (char *)ie);
+		}
+		mutex_lock(&wx->lock);
+		len = wx->resp_ie_len;
+		memcpy(ie, wx->resp_ie, len);
+		mutex_unlock(&wx->lock);
+		if (len) {
+			memset(&iw, 0, sizeof(iw));
+			iw.data.length = len;
+			wireless_send_event(priv->ndev, IWEVASSOCRESPIE, &iw,
+					    (char *)ie);
+		}
 		netif_carrier_on(priv->ndev);
-	else
+	} else {
 		netif_carrier_off(priv->ndev);
+	}
+	if (!bssid)
+		jedi_eapol_release(priv, false);
 	wireless_send_event(priv->ndev, SIOCGIWAP, &wrqu, NULL);
+	if (bssid)
+		jedi_eapol_release(priv, true);
 }
 
 /*
@@ -94,6 +126,37 @@ void jedi_wext_bss_clear(struct jedi_private *priv)
 }
 
 /* Add or update a scan result. freq in MHz, level in dBm. */
+/* WMM flag of the strongest scanned BSS with this SSID (0x13000108). */
+bool jedi_bss_wmm(struct jedi_private *priv, const u8 *ssid, u8 ssid_len)
+{
+	struct jedi_wext *wx = &priv->wx;
+	int i, best = -1;
+	bool ret = false;
+
+	mutex_lock(&wx->lock);
+	for (i = 0; i < wx->nbss; i++)
+		if (wx->bss[i].ssid_len == ssid_len &&
+		    !memcmp(wx->bss[i].ssid, ssid, ssid_len) &&
+		    (best < 0 || wx->bss[i].level > wx->bss[best].level))
+			best = i;
+	if (best >= 0)
+		ret = wx->bss[best].wmm;
+	mutex_unlock(&wx->lock);
+	return ret;
+}
+
+void jedi_bss_set_wmm(struct jedi_private *priv, const u8 *bssid, bool wmm)
+{
+	struct jedi_wext *wx = &priv->wx;
+	int i;
+
+	mutex_lock(&wx->lock);
+	for (i = 0; i < wx->nbss; i++)
+		if (!memcmp(wx->bss[i].bssid, bssid, ETH_ALEN))
+			wx->bss[i].wmm = wmm;
+	mutex_unlock(&wx->lock);
+}
+
 int jedi_wext_bss_add(struct jedi_private *priv,
 		const u8 *bssid, const u8 *ssid, u8 ssid_len, u16 freq,
 		s8 level, u16 caps, const u8 *ie, u16 ie_len)
@@ -539,23 +602,58 @@ static int jedi_install_sta_key(struct jedi_private *priv, const u8 *mac,
 		memcpy(priv->wx.key[idx].mac, mac, ETH_ALEN);
 	}
 	memcpy(b, mac, ETH_ALEN);
-	/* b[6..7]: unknown u16 */
+	/* b[6..7]: unknown u16, zero in both captures */
 	put_unaligned_le16(idx, b + 8);
 	b[10] = type;
 	b[11] = len;
 	memcpy(b + 12, key, len);
 
-	if (rsc) {
+	/*
+	 * WPA2 captures: both the pairwise and the group key go to 0x1200000a
+	 * (64 bytes), never to 0x12000008 (that one only carries the clear
+	 * and the dummy slot records). The tail repeats the MAC, then
+	 * idx at +52 and the "transmit/pairwise" flag at +53. The receive
+	 * sequence counter is zero unless the supplicant supplies it.
+	 */
+	{
 		u8 *r = b + 44;
 
 		memcpy(r, mac, ETH_ALEN);
 		r[8] = idx;
 		r[9] = tx;
-		memcpy(r + 10, rsc, 6);
-		return jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_STA_KEY_RSC, b, 64,
-				NULL, 0, NULL);
+		if (rsc && jedi_rsc_mode == 0) {
+			memcpy(r + 10, rsc, 6);
+		} else if (rsc && jedi_rsc_mode == 2) {
+			int i;
+
+			for (i = 0; i < 6; i++)
+				r[10 + i] = rsc[5 - i];
+		}
 	}
-	return jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_STA_KEY, b, 44, NULL, 0,
+	if (jedi_key_dump)
+		print_hex_dump_bytes("jedi: keyrec ", DUMP_PREFIX_OFFSET, b, 64);
+	return jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_STA_KEY_RSC, b, 64,
+			NULL, 0, NULL);
+}
+
+/*
+ * Remove a station key. The WinCE captures never remove one (only the
+ * type-8 "clear" record on 0x12000008), and overwriting with a zero key
+ * leaves a valid all-zero CCMP key installed that then encrypts EAPOL
+ * message 2 of the next handshake. Try the 0x12000008 convention on the
+ * 0x1200000a record: type byte 8.
+ */
+int jedi_key_remove(struct jedi_private *priv, const u8 *mac, int idx)
+{
+	u8 b[64] = { 0 };
+
+	memcpy(b, mac, ETH_ALEN);
+	put_unaligned_le16(idx, b + 8);
+	b[10] = 8;
+	memcpy(b + 44, mac, ETH_ALEN);
+	b[52] = idx;
+	dev_info(&priv->func->dev, "jedi: remove key idx %d for %pM\n", idx, mac);
+	return jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_STA_KEY_RSC, b, 64, NULL, 0,
 			NULL);
 }
 
@@ -589,10 +687,14 @@ static int jedi_wx_siwencodeext(struct net_device *dev,
 			int ret;
 
 			memcpy(mac, wx->key[idx].mac, ETH_ALEN);
-			ret = jedi_install_sta_key(priv, mac, idx,
-						   wx->key[idx].type, zero,
-						   wx->key[idx].len, false,
-						   NULL);
+			if (jedi_key_remove_mode)
+				ret = jedi_key_remove(priv, mac, idx);
+			else
+				ret = jedi_install_sta_key(priv, mac, idx,
+							   wx->key[idx].type,
+							   zero,
+							   wx->key[idx].len,
+							   false, NULL);
 			wx->key[idx].valid = false;
 			return ret;
 		}
@@ -634,13 +736,41 @@ static int jedi_wx_siwencodeext(struct net_device *dev,
 	}
 
 	/* Group keys are keyed by the BSSID, pairwise by the peer address. */
-	mac = (group || is_zero_ether_addr((u8 *)ext->addr.sa_data) ||
-	       is_broadcast_ether_addr((u8 *)ext->addr.sa_data)) ?
-	      priv->wx.cur_bssid : (u8 *)ext->addr.sa_data;
+	/* WPA2 capture: PTK keyed by the AP address, GTK by ff:ff:ff:ff:ff:ff */
+	{
+		static const u8 bcast[ETH_ALEN] = { 0xff, 0xff, 0xff, 0xff, 0xff, 0xff };
+		bool pairwise = !group && !is_zero_ether_addr((u8 *)ext->addr.sa_data)
+				&& !is_broadcast_ether_addr((u8 *)ext->addr.sa_data);
+
+		mac = pairwise ? (u8 *)ext->addr.sa_data : bcast;
+		if (!pairwise)
+			group = true;
+	}
+	if (!group) {
+		/* wpa_supplicant sends EAPOL message 4 and then installs the
+		 * PTK; the message must leave unencrypted, so let the TX
+		 * queue drain first (WinCE: key SET 3 ms after message 4). */
+		/* flush_work also covers the frame the worker has already
+		 * dequeued (it may still be in its trace output) */
+		flush_work(&priv->tx_work);
+		msleep(jedi_ptk_delay_ms);
+	}
+	dev_info(&priv->func->dev, "jedi: install %s key idx %d type %u len %d tx %d rsc %d for %pM\n",
+		 group ? "group" : "pairwise", idx, type, keylen, tx,
+		 !!(ext->ext_flags & IW_ENCODE_EXT_RX_SEQ_VALID), mac);
 	ret = jedi_install_sta_key(priv, mac, idx, type, tkbuf, keylen, tx,
 		(ext->ext_flags & IW_ENCODE_EXT_RX_SEQ_VALID) ? ext->rx_seq : NULL);
-	if (!ret && !group)
-		jedi_hw_port_authorize(priv, true);	/* TODO(RE Q4) */
+	if (!ret) {
+		if (group)
+			priv->wx.gtk_set = true;
+		else
+			priv->wx.ptk_set = true;
+		/* WinCE: SET 0x150007e4 follows the GTK, which follows the PTK */
+		if (priv->wx.ptk_set && priv->wx.gtk_set) {
+			jedi_hw_port_authorize(priv, true);
+			priv->wx.ptk_set = priv->wx.gtk_set = false;
+		}
+	}
 	return ret;
 }
 

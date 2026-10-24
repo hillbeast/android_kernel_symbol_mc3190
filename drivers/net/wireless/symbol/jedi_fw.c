@@ -925,3 +925,18 @@ out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(jedi_fw_download);
+/*
+ * Wi-Fi off: park the chip in its boot ROM. The firmware stops, the radio
+ * is down and the chip idles, while the SDIO card stays enumerated, so
+ * reloading jedi.ko just downloads the firmware again (no power cut, no
+ * MMC re-enumeration).
+ */
+int jedi_fw_halt(struct sdio_func *func)
+{
+	int ret;
+
+	sdio_claim_host(func);
+	ret = jedi_chip_reset(func);
+	sdio_release_host(func);
+	return ret;
+}

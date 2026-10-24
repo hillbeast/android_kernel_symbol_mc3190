@@ -349,6 +349,11 @@ static struct platform_device mc3190_pwrmicro_device = {
 };
 
 #if defined(CONFIG_MMC)
+
+static DEFINE_MUTEX(mc3190_wifi_pwr_lock);
+static bool mc3190_wifi_powered;		/* was 'static bool powered' inside setpower */
+static struct mmc_host *mc3190_wifi_host;
+
 static int mc3190_mci_init(struct device *dev, irq_handler_t detect_int, void *data)
 {
 	struct mmc_host *mmc = dev_get_drvdata(dev);
@@ -358,6 +363,8 @@ static int mc3190_mci_init(struct device *dev, irq_handler_t detect_int, void *d
 		mmc->caps |= MMC_CAP_NONREMOVABLE;
 	}
 
+	mc3190_wifi_host = data;
+
 	return 0;
 }
 
@@ -365,11 +372,9 @@ static int mc3190_mci_init(struct device *dev, irq_handler_t detect_int, void *d
 #define MC3190_WIFI_T2_MS	150	/* ResetPulseWidth */
 #define MC3190_WIFI_T3_MS	50	/* InterResetDelay */
 
-static void mc3190_mci_setpower(struct device *dev, unsigned int vdd)
+static void __mc3190_mci_setpower(unsigned int vdd)
 {
-	static bool powered;
-
-	if (vdd && !powered) {		/* Power On */
+	if (vdd && !mc3190_wifi_powered) {		/* Power On */
 		mc3190_cpld_regon(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
 		mc3190_cpld_regon(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
 		msleep(MC3190_WIFI_T1_MS);
@@ -383,13 +388,69 @@ static void mc3190_mci_setpower(struct device *dev, unsigned int vdd)
 		mc3190_cpld_regoff(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
 
 		/* PostResetDelay (T4) = 0 on this device */
-		powered = true;
-	} else if (!vdd && powered) {	/* Power Off */
+		mc3190_wifi_powered = true;
+	} else if (!vdd && mc3190_wifi_powered) {	/* Power Off */
 		mc3190_cpld_regon(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
 		mc3190_cpld_regoff(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
-		powered = false;
+		mc3190_wifi_powered = false;
 	}
 }
+
+static void mc3190_mci_setpower(struct device *dev, unsigned int vdd)
+{
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	__mc3190_mci_setpower(vdd);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
+}
+
+void mc3190_wifi_power_off(void)
+{
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	__mc3190_mci_setpower(0);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
+}
+EXPORT_SYMBOL_GPL(mc3190_wifi_power_off);
+
+void mc3190_wifi_power_on(void)
+{
+	bool was_off;
+	struct mmc_host *host = mc3190_wifi_host;
+	struct mmc_card *old = NULL;
+ 
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	was_off = !mc3190_wifi_powered;
+	if (was_off)
+		__mc3190_mci_setpower(MMC_VDD_33_34);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
+ 
+	pr_info("mc3190: wifi power on: was_off=%d host=%p\n", was_off, host);
+	if (!was_off || !host)
+		return;
+ 
+	old = host->card;
+	mmc_detect_change(host, 0);
+	flush_delayed_work(&host->detect);
+	pr_info("mc3190: card %p -> %p after detect\n", old, host->card);
+ 
+	if (!host->card || host->card == old) {
+		pr_warn("mc3190: card not re-enumerated, forcing host remove/add\n");
+		mmc_remove_host(host);
+		mmc_add_host(host);
+		flush_delayed_work(&host->detect);
+		pr_info("mc3190: card now %p\n", host->card);
+	}
+}
+EXPORT_SYMBOL_GPL(mc3190_wifi_power_on);
+
+void mc3190_wifi_power_cycle(void)
+{
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	__mc3190_mci_setpower(0);
+	msleep(100);
+	__mc3190_mci_setpower(MMC_VDD_33_34);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
+}
+EXPORT_SYMBOL_GPL(mc3190_wifi_power_cycle);
 
 static struct pxamci_platform_data mc3190_mci_platform_data = {		// WiFi
 	.detect_delay_ms	= 200,
