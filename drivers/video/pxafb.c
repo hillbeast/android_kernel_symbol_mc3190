@@ -1362,7 +1362,7 @@ static int pxafb_activate_var(struct fb_var_screeninfo *var,
 	 * Only update the registers if the controller is enabled
 	 * and something has changed.
 	 */
-	if ((lcd_readl(fbi, LCCR0) != fbi->reg_lccr0) ||
+	if ((lcd_readl(fbi, LCCR0) & ~LCCR0_ENB) != fbi->reg_lccr0 ||
 	    (lcd_readl(fbi, LCCR1) != fbi->reg_lccr1) ||
 	    (lcd_readl(fbi, LCCR2) != fbi->reg_lccr2) ||
 	    (lcd_readl(fbi, LCCR3) != fbi->reg_lccr3) ||
@@ -1510,7 +1510,8 @@ static void set_ctrlr_state(struct pxafb_info *fbi, u_int state)
 		 * Disable controller for clock change.  If the
 		 * controller is already disabled, then do nothing.
 		 */
-		if (old_state != C_DISABLE && old_state != C_DISABLE_PM) {
+		if (old_state != C_DISABLE && old_state != C_DISABLE_PM &&
+		    old_state != C_DISABLE_CLKCHANGE) {
 			fbi->state = state;
 			/* TODO __pxafb_lcd_power(fbi, 0); */
 			pxafb_disable_controller(fbi);

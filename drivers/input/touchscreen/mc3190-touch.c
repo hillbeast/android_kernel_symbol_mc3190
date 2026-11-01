@@ -139,6 +139,9 @@ static int mc3190_touch_probe(struct platform_device *pdev)
 static int mc3190_touch_remove(struct platform_device *pdev)
 {
 	struct mc3190_touch *touch = platform_get_drvdata(pdev);
+	struct mc3190_pwrmicro *core = dev_get_drvdata(pdev->dev.parent);
+
+	mc3190_set_touch_dev(core, NULL);
 	input_unregister_device(touch->input);
 
 	return 0;

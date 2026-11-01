@@ -619,7 +619,7 @@ static void inc_ep_stats_bytes(struct pxa_ep *ep, int count, int is_in)
  *
  * Find the physical pxa27x ep, and setup its UDCCR
  */
-static __init void pxa_ep_setup(struct pxa_ep *ep)
+static void pxa_ep_setup(struct pxa_ep *ep)
 {
 	u32 new_udccr;
 
@@ -641,7 +641,7 @@ static __init void pxa_ep_setup(struct pxa_ep *ep)
  *
  * Setup all pxa physical endpoints, except ep0
  */
-static __init void pxa_eps_setup(struct pxa_udc *dev)
+static void pxa_eps_setup(struct pxa_udc *dev)
 {
 	unsigned int i;
 
@@ -1489,7 +1489,7 @@ static int pxa_ep_disable(struct usb_ep *_ep)
 
 	udc_usb_ep = container_of(_ep, struct udc_usb_ep, usb_ep);
 	ep = udc_usb_ep->pxa_ep;
-	if (!ep || is_ep0(ep) || !list_empty(&ep->queue))
+	if (!ep || is_ep0(ep))
 		return -EINVAL;
 
 	ep->enabled = 0;
@@ -1528,6 +1528,8 @@ static struct usb_ep_ops pxa_ep_ops = {
  */
 static void dplus_pullup(struct pxa_udc *udc, int on)
 {
+	clk_enable(udc->clk);
+
 	if (on) {
 		if (gpio_is_valid(udc->mach->gpio_pullup))
 			gpio_set_value(udc->mach->gpio_pullup,
@@ -1541,6 +1543,8 @@ static void dplus_pullup(struct pxa_udc *udc, int on)
 		if (udc->mach->udc_command)
 			udc->mach->udc_command(PXA2XX_UDC_CMD_DISCONNECT);
 	}
+
+	clk_disable(udc->clk);
 	udc->pullup_on = on;
 }
 
@@ -1633,12 +1637,18 @@ static int pxa_udc_pullup(struct usb_gadget *_gadget, int is_active)
 	if (!gpio_is_valid(udc->mach->gpio_pullup) && !udc->mach->udc_command)
 		return -EOPNOTSUPP;
 
-	dplus_pullup(udc, is_active);
-
-	if (should_enable_udc(udc))
-		udc_enable(udc);
-	if (should_disable_udc(udc))
-		udc_disable(udc);
+	if (is_active) {
+		/* bring the UDC up with D+ low, then raise D+ so the host's
+		 * reset can't land inside udc_enable()'s startup window */
+		udc->pullup_on = 1;
+		if (should_enable_udc(udc))
+			udc_enable(udc);
+		dplus_pullup(udc, 1);
+	} else {
+		dplus_pullup(udc, 0);
+		if (should_disable_udc(udc))
+			udc_disable(udc);
+	}
 	return 0;
 }
 
@@ -1778,6 +1788,7 @@ static void udc_enable(struct pxa_udc *udc)
 	ep0_idle(udc);
 	udc->gadget.speed = USB_SPEED_FULL;
 	memset(&udc->stats, 0, sizeof(udc->stats));
+	pxa_eps_setup(udc);
 
 	udc_set_mask_UDCCR(udc, UDCCR_UDE);
 	ep_write_UDCCSR(&udc->pxa_ep[0], UDCCSR0_ACM);
@@ -2446,6 +2457,8 @@ static struct pxa_udc memory = {
 		USB_EP_IN_ISO(3),
 		USB_EP_OUT_ISO(4),
 		USB_EP_IN_INT(5),
+		USB_EP_IN_BULK(6),
+		USB_EP_OUT_BULK(7),
 	},
 
 	.pxa_ep = {
@@ -2463,18 +2476,35 @@ static struct pxa_udc memory = {
 		PXA_EP_OUT_BULK(8, 1, 2, 0, 0),
 		PXA_EP_IN_BULK(9,  2, 2, 0, 0),
 		PXA_EP_IN_INT(10,  5, 2, 0, 0),
-		/*
-		 * All the following endpoints are only for completion.  They
-		 * won't never work, as multiple interfaces are really broken on
-		 * the pxa.
-		*/
-		PXA_EP_OUT_BULK(11, 1, 2, 1, 0),
-		PXA_EP_IN_BULK(12,  2, 2, 1, 0),
+		/* second bulk pair (adb alongside mtp): tagged (cfg1, iface0, alt0)
+		 * because the UDC only tracks one active interface */
+		PXA_EP_IN_BULK(11,  6, 1, 0, 0),
+		PXA_EP_OUT_BULK(12, 7, 1, 0, 0),
 		/* Endpoint for CDC Ether */
 		PXA_EP_OUT_BULK(13, 1, 1, 1, 1),
 		PXA_EP_IN_BULK(14,  2, 1, 1, 1),
 	}
 };
+
+void pxa_udc_cable_event(int present)
+{
+	struct pxa_udc *udc = the_controller;
+
+	pr_info("cable_event(%d) enabled=%d speed=%d\n", present, udc->enabled, udc->gadget.speed);
+
+	if (!udc || !udc->driver)
+		return;
+	if (present) {
+		dplus_pullup(udc, 1);
+		if (should_enable_udc(udc))
+			udc_enable(udc);
+	} else {
+		stop_activity(udc, udc->driver);
+		udc_disable(udc);
+		dplus_pullup(udc, 0);
+	}
+}
+EXPORT_SYMBOL(pxa_udc_cable_event);
 
 /**
  * pxa_udc_probe - probes the udc device

@@ -1,12 +1,26 @@
-// SPDX-License-Identifier: GPL-2.0
 /*
- * jedi_fw.c -- Firmware download for the Symbol "Jedi" (Conexant CX50222)
- * SDIO WiFi module, MC3190.
+ * jedi_fw.c -- Firmware Downloader for Symbol "Jedi" WiFi module in MC3190
  *
- * Protocol fully reverse-engineered from JEDI10.dll (WinCE miniport),
- * specifically FUN_1004e6d0 ("DownloadFirmware") and its subordinates
- * FUN_1004e61c, FUN_1004e678, FUN_1004e3f4, FUN_1004e448, FUN_1004e4b8,
- * FUN_1004e584.
+ * By Mark Kennard <markkennard4@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+*/
+
+/*
+ * Protocol reverse-engineered from JEDI10.dll (WinCE miniport),
+ * specifically FUN_1004e6d0 ("DownloadFirmware") and its subordinates.
+ * See mc3190_jedi_glossary.md, REVISION 2 (R2.x references below).
  *
  * Firmware container format (JEDI10_dll.bin, raw / unstripped):
  *
@@ -15,68 +29,60 @@
  *     u32 length    (LE, payload byte count)
  *     u8  payload[length]
  *
- * Two distinct write paths exist:
+ * REGISTER ACCESS (R2.1):
+ *   All control registers (0x04..0x54) are accessed with CMD52, one byte
+ *   at a time, at ASCENDING addresses, little-endian. Every status bit
+ *   the protocol tests (0x2000/0x4000/0x8000 in HOST_INT, the RESET and
+ *   RAMBOOT bits in DEVSTAT) lives in a HIGH byte, which a fixed-address
+ *   CMD53 (sdio_readsb/writesb) can never reach.
+ *   Only the data port (function 1, address 0x0) is CMD53 fixed-address.
  *
- * BULK PATH (bit 31 of address clear):
- *   CMD53 byte-mode writes to SDIO Func 1 addr 0x0 in <=512 byte bursts.
- *   After each burst: poll REG_HOST_INT (0x40) for bit 0x2000, then ack
- *   via REG_HOST_INT_ACK (0x48).
+ * SEQUENCE:
+ *   1. Chip reset into boot ROM (R2.3 D)       jedi_chip_reset()
+ *   2. Chunk 0, monitor path (R2.3 E)          jedi_monitor_write()
+ *   3. Remaining chunks, bulk data port        jedi_download_chunk()
+ *   4. Unmask interrupts, wait for FW Init     jedi_wait_fw_boot() (R2.4)
  *
- * MONITOR PATH (bit 31 of address set, only chunk 0 in practice):
- *   Uses a byte-at-a-time ASCII ROM monitor protocol over register 0x4c.
- *   Fully confirmed against WinCE disassembly. See jedi_monitor_write().
- *
- * Register map (confirmed):
- *   0x38 W  Control/strobe: 0x8000="byte sent, sample it"; 0x4000="flush"
- *   0x40 R  REG_HOST_INT: 0x2000=bulk-block-ok; 0x4000=byte-tx-ok;
- *                          0x8000=TX-buffer-draining
- *   0x48 W  REG_HOST_INT_ACK: write 0x2000 to ack bulk block;
- *                              write 0xffffffff to clear all pending
- *   0x4c W  Monitor byte FIFO (one byte per write, also used for the
- *           32-bit unlock magic 0x12345678 as an initial wider write)
- *   0x54 R/W Strobe/trigger used at end of monitor chunk
+ * Register map (see jedi.h for the defines).
  */
 
-#include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/file.h>
+#include <linux/fs.h>
+#include <linux/vmalloc.h>
+#include <asm/uaccess.h>
 #include <linux/firmware.h>
+#include <linux/jiffies.h>
 #include <linux/mmc/sdio.h>
 #include <linux/mmc/sdio_func.h>
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/uaccess.h>
+
+#include "jedi.h"
 
 #define JEDI_FW_NAME		"jedi_fw.bin"
-
-/* REG_HOST_INT (0x40) bit flags */
-#define JEDI_HOST_INT_BULK_OK	0x2000	/* bulk block accepted */
-#define JEDI_HOST_INT_BYTE_OK	0x4000	/* monitor byte accepted */
-#define JEDI_HOST_INT_TX_BUSY	0x8000	/* TX buffer still draining */
-
-/* Register addresses */
-#define JEDI_REG_CTRL		0x38
-#define JEDI_REG_HOST_INT	0x40
-#define JEDI_REG_HOST_INT_ACK	0x48
-#define JEDI_REG_MONITOR_FIFO	0x4c
-#define JEDI_REG_TRIGGER	0x54
-
-/* CTRL register strobe values */
-#define JEDI_CTRL_BYTE_STROBE	0x8000
-#define JEDI_CTRL_FLUSH		0x4000
 
 /* Chunk address flag: bit 31 set = use monitor path */
 #define JEDI_CHUNK_MONITOR_FLAG	0x80000000UL
 
-/* Maximum burst size for bulk CMD53 path.
- * Matches the 0x1ff (511) mask used throughout JEDI10.dll — the CMD53
- * 9-bit byte-count field gives a natural 512-byte ceiling. */
+/* Maximum burst size for the bulk CMD53 data port (9-bit count field). */
 #define JEDI_MAX_BURST		512
 
-/* Bulk-path block handshake timeout. WinCE busy-polls up to 0xffff times
- * with a 1us stall (~65ms worst case). We use udelay() to match — 2.6.35
- * does not have usleep_range(). Total budget matches WinCE with margin. */
-#define JEDI_BULK_POLL_US	1
-#define JEDI_BULK_POLL_MAX	0xffff
+/* WinCE hardcodes both the target address and the byte count as ASCII
+ * literals. Address 0x1ffe0000 is the boot ROM trampoline area; count
+ * 0x9d4 (2516) is a literal in WinCE, not derived from the chunk. */
+#define JEDI_MONITOR_CMD	"<1ffe0000 9d4\r"
+
+/* Timeouts */
+#define JEDI_BULK_TIMEOUT_MS		1000
+#define JEDI_MON_DONE_TIMEOUT_MS	5000	/* WinCE: 65535 tries, a few s */
+#define JEDI_BOOT_TIMEOUT_MS		10000	/* WinCE watchdog: 10 s (R2.4) */
+#define JEDI_RESET_WAIT_POLLS		100     /* R2.3 D.2: ~100 reads */
+#define JEDI_FLUSH_MAX			1000
+
+/* Per-byte monitor handshake poll. WinCE reads once; we poll briefly. */
+#define JEDI_MON_POLL_US	20
+#define JEDI_MON_POLL_MAX	20
 
 struct jedi_fw_chunk {
 	__le32 address;
@@ -84,31 +90,198 @@ struct jedi_fw_chunk {
 	u8 payload[];
 } __packed;
 
-/* Diagnostic module param: skip the monitor-path chunk instead of
- * aborting, to allow bulk-path transport testing before the chip boots.
- * The chip will NOT produce a working firmware load with this set. */
-static bool jedi_fw_skip_monitor;
-module_param(jedi_fw_skip_monitor, bool, 0644);
-MODULE_PARM_DESC(jedi_fw_skip_monitor,
-	"DIAGNOSTIC: skip monitor-path chunk; chip will not boot. "
-	"Transport test use only.");
-
 /* ------------------------------------------------------------------ */
-/* Low-level register helpers                                          */
+/* Register layer: CMD52, ascending addresses, little-endian (R2.1)    */
 /* ------------------------------------------------------------------ */
 
-static int jedi_reg_read(struct sdio_func *func, u32 addr, u32 *val)
+int jedi_reg_read(struct sdio_func *func, u32 addr, unsigned int n, u32 *val)
 {
+	u32 v = 0;
+	unsigned int i;
 	int ret;
-	*val = sdio_readl(func, addr, &ret);
+
+	for (i = 0; i < n; i++) {
+		u8 b = sdio_readb(func, addr + i, &ret);
+
+		if (ret)
+			return ret;
+		v |= (u32)b << (8 * i);
+	}
+	*val = v;
+	return 0;
+}
+
+int jedi_reg_write(struct sdio_func *func, u32 addr, unsigned int n, u32 val)
+{
+	unsigned int i;
+	int ret = 0;
+
+	for (i = 0; i < n; i++) {
+		sdio_writeb(func, (val >> (8 * i)) & 0xff, addr + i, &ret);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+static int jedi_host_int(struct sdio_func *func, u16 *status)
+{
+	u32 v;
+	int ret;
+
+	ret = jedi_reg_read(func, JEDI_REG_HOST_INT, 2, &v);
+	if (!ret)
+		*status = v;
 	return ret;
 }
 
-static int jedi_reg_write(struct sdio_func *func, u32 addr, u32 val)
+static int jedi_ack(struct sdio_func *func, u32 val)
+{
+	return jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 4, val);
+}
+
+static int jedi_ctrl(struct sdio_func *func, u32 val)
+{
+	return jedi_reg_write(func, JEDI_REG_CTRL, 4, val);
+}
+
+static int jedi_monitor_writeb(struct sdio_func *func, u8 val)
 {
 	int ret;
-	sdio_writel(func, val, addr, &ret);
+
+	sdio_writeb(func, val, JEDI_REG_MONITOR_FIFO, &ret);
 	return ret;
+}
+
+/* DEVSTAT read-modify-write: v = (v & ~clear) | set. */
+static int jedi_devstat_rmw(struct sdio_func *func, u32 set, u32 clear,
+			    u32 *after)
+{
+	u32 v;
+	int ret;
+
+	ret = jedi_reg_read(func, JEDI_REG_DEVSTAT, 4, &v);
+	if (ret)
+		return ret;
+	v = (v & ~clear) | set;
+	ret = jedi_reg_write(func, JEDI_REG_DEVSTAT, 4, v);
+	if (!ret && after)
+		*after = v;
+	return ret;
+}
+
+/*
+ * Poll HOST_INT until any bit in @mask is set. Returns 0 (hit),
+ * -ETIMEDOUT, or a bus error. @last receives the last value read.
+ * Spins briefly first, then sleeps.
+ */
+static int jedi_wait_host_int(struct sdio_func *func, u16 mask,
+			      unsigned int timeout_ms, u16 *last)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(timeout_ms);
+	unsigned int i = 0;
+	u16 status = 0;
+	int ret;
+
+	do {
+		ret = jedi_host_int(func, &status);
+		if (ret)
+			return ret;
+		*last = status;
+		if (status & mask)
+			return 0;
+		if (i++ < 100)
+			udelay(20);
+		else
+			msleep(1);
+	} while (time_before(jiffies, deadline));
+
+	return -ETIMEDOUT;
+}
+
+/* Snapshot of every register the protocol touches, for error paths. */
+static void jedi_dump_regs(struct sdio_func *func, const char *where)
+{
+	u32 hostint = 0, devstat = 0;
+	u8 r04, r4c, r50;
+	int e04, e40, e54, e4c, e50;
+
+	r04 = sdio_readb(func, JEDI_REG_STATUS, &e04);
+	e40 = jedi_reg_read(func, JEDI_REG_HOST_INT, 2, &hostint);
+	e54 = jedi_reg_read(func, JEDI_REG_DEVSTAT, 4, &devstat);
+	r4c = sdio_readb(func, JEDI_REG_MONITOR_FIFO, &e4c);
+	r50 = sdio_readb(func, JEDI_REG_TX_READY, &e50);
+
+	dev_info(&func->dev,
+		 "jedi_fw: [%s] 0x04=%02x HOST_INT=%04x DEVSTAT=%08x "
+		 "0x4c=%02x 0x50=%02x (err %d/%d/%d/%d/%d)\n",
+		 where, r04, hostint, devstat, r4c, r50,
+		 e04, e40, e54, e4c, e50);
+}
+
+/* ------------------------------------------------------------------ */
+/* Chip reset into boot ROM (R2.3 D, FUN_1004e2e0)                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Mask host interrupts, wait for DEVSTAT bit 0x8000 to clear, then pulse
+ * RESET with RAMBOOT cleared so the chip comes up from its boot ROM
+ * (which is what makes the ROM monitor listen). There is no "ROM ready"
+ * signal: the host causes it (R2.0 #2).
+ */
+static int jedi_chip_reset(struct sdio_func *func)
+{
+	u32 ds = 0;
+	unsigned int i;
+	u8 b;
+	int ret;
+
+	/* D.1 */
+	ret = jedi_reg_write(func, JEDI_REG_INT_ENABLE, 2, 0);
+	if (ret) {
+		dev_err(&func->dev, "jedi_fw: reset: INT_ENABLE write failed: %d\n",
+			ret);
+		return ret;
+	}
+
+	/* D.2 */
+	for (i = 0; i < JEDI_RESET_WAIT_POLLS; i++) {
+		ret = jedi_reg_read(func, JEDI_REG_DEVSTAT, 4, &ds);
+		if (ret)
+			return ret;
+		if (!(ds & JEDI_DEVSTAT_WAIT))
+			break;
+		udelay(100);
+	}
+	if (ds & JEDI_DEVSTAT_WAIT)
+		dev_warn(&func->dev,
+			 "jedi_fw: reset: DEVSTAT 0x8000 still set after %u "
+			 "polls (DEVSTAT=0x%08x), continuing\n", i, ds);
+
+	/* D.3: clear RESET | RAMBOOT */
+	ret = jedi_devstat_rmw(func, 0,
+			       JEDI_DEVSTAT_RESET | JEDI_DEVSTAT_RAMBOOT, &ds);
+	if (ret)
+		return ret;
+	/* D.4: assert RESET */
+	ret = jedi_devstat_rmw(func, JEDI_DEVSTAT_RESET, 0, &ds);
+	if (ret)
+		return ret;
+	/* D.5: release RESET (RAMBOOT clear => boot ROM) */
+	ret = jedi_devstat_rmw(func, 0, JEDI_DEVSTAT_RESET, &ds);
+	if (ret)
+		return ret;
+
+	/* D.6 */
+	msleep(50);
+
+	/* D.7 */
+	b = sdio_readb(func, JEDI_REG_STATUS, &ret);
+	if (ret)
+		return ret;
+
+	jedi_dbg(func, "chip reset done: DEVSTAT=0x%08x, 0x04=0x%02x\n", ds, b);
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -116,59 +289,24 @@ static int jedi_reg_write(struct sdio_func *func, u32 addr, u32 val)
 /* ------------------------------------------------------------------ */
 
 /*
- * jedi_wait_block_accepted() - poll REG_HOST_INT for bit 0x2000 and
- * acknowledge. Matches DownloadFirmware's inner poll loop exactly,
- * using udelay() as required for 2.6.35.
- */
-static int jedi_wait_block_accepted(struct sdio_func *func)
-{
-	u32 status;
-	unsigned int i;
-	int ret;
-
-	for (i = 0; i < JEDI_BULK_POLL_MAX; i++) {
-		ret = jedi_reg_read(func, JEDI_REG_HOST_INT, &status);
-		if (ret) {
-			dev_err(&func->dev,
-				"jedi_fw: REG_HOST_INT read failed: %d\n", ret);
-			return ret;
-		}
-
-		if (status & JEDI_HOST_INT_BULK_OK) {
-			ret = jedi_reg_write(func, JEDI_REG_HOST_INT_ACK,
-					     JEDI_HOST_INT_BULK_OK);
-			if (ret)
-				dev_err(&func->dev,
-					"jedi_fw: bulk ack write failed: %d\n",
-					ret);
-			return ret;
-		}
-
-		udelay(JEDI_BULK_POLL_US);
-	}
-
-	dev_err(&func->dev,
-		"jedi_fw: timed out waiting for bulk block acceptance "
-		"(REG_HOST_INT=0x%x)\n", status);
-	return -ETIMEDOUT;
-}
-
-/*
- * jedi_download_chunk() - send one bulk-path firmware chunk.
+ * Send one block stream (R4): the chunk body only, which carries its own
+ * 12-byte {dest_or_last, len, entry} header. The container's 8-byte
+ * (addr, len) header is never sent. The body goes out in 512-byte byte-mode
+ * CMD53 bursts, the last one shorter, through a kmalloc'd bounce buffer
+ * (the PXA320 MMC DMA cannot take request_firmware()'s vmalloc memory).
+ * The data port is function 1, address 0, fixed-address.
  *
- * Uses a kmalloc'd bounce buffer: sdio_writesb() calls into the PXA320
- * MMC DMA engine which requires a physically contiguous buffer;
- * request_firmware() data is vmalloc-backed and will oops in
- * dma_cache_maint_page otherwise (confirmed on first hardware run,
- * 2.6.35/PXA320).
+ * The stub raises HOST_INT 0x2000 once per accepted block, and it must be
+ * acked before the next block is sent. The last block raises 0x0001 (FW
+ * Init) instead, which jedi_wait_fw_boot() picks up.
  */
 static int jedi_download_chunk(struct sdio_func *func,
 			       const u8 *data, u32 len,
-			       unsigned int chunk_num)
+			       unsigned int chunk_num, bool last)
 {
 	u8 *bounce;
 	u32 sent = 0;
-	unsigned int burst_num = 0;
+	u16 status = 0;
 	int ret;
 
 	bounce = kmalloc(JEDI_MAX_BURST, GFP_KERNEL);
@@ -179,402 +317,565 @@ static int jedi_download_chunk(struct sdio_func *func,
 		u32 burst = min_t(u32, len - sent, JEDI_MAX_BURST);
 
 		memcpy(bounce, data + sent, burst);
-
-		dev_dbg(&func->dev,
-			"jedi_fw: chunk %u burst %u: %u bytes (offset %u/%u)\n",
-			chunk_num, burst_num, burst, sent, len);
-
 		ret = sdio_writesb(func, 0x0, bounce, burst);
 		if (ret) {
 			dev_err(&func->dev,
 				"jedi_fw: chunk %u burst write failed at "
-				"offset %u/%u: %d\n",
-				chunk_num, sent, len, ret);
+				"offset %u/%u: %d\n", chunk_num, sent, len, ret);
+			jedi_dump_regs(func, "burst failure");
 			goto out;
 		}
-
-		ret = jedi_wait_block_accepted(func);
-		if (ret) {
-			dev_err(&func->dev,
-				"jedi_fw: chunk %u block handshake failed at "
-				"offset %u/%u\n", chunk_num, sent, len);
-			goto out;
-		}
-
 		sent += burst;
-		burst_num++;
 	}
 
-	dev_info(&func->dev,
-		 "jedi_fw: chunk %u complete: %u bytes in %u bursts\n",
-		 chunk_num, len, burst_num);
-	ret = 0;
+	if (last) {
+		jedi_dbg(func, "chunk %u sent (last block, FW Init follows)\n",
+			 chunk_num);
+		ret = 0;
+		goto out;
+	}
 
+	ret = jedi_wait_host_int(func, JEDI_HOST_INT_BULK_OK,
+				 3 * JEDI_BULK_TIMEOUT_MS, &status);
+	if (ret == -ETIMEDOUT) {
+		dev_err(&func->dev,
+			"jedi_fw: chunk %u: block not accepted (HOST_INT=0x%04x)\n",
+			chunk_num, status);
+		jedi_dump_regs(func, "block timeout");
+		goto out;
+	}
+	if (ret)
+		goto out;
+
+	ret = jedi_ack(func, JEDI_HOST_INT_BULK_OK);
+	if (!ret)
+		jedi_dbg(func, "chunk %u: %u bytes accepted\n", chunk_num, len);
 out:
 	kfree(bounce);
 	return ret;
 }
 
 /* ------------------------------------------------------------------ */
-/* Monitor path                                                        */
+/* Monitor path (R2.3 E)                                               */
 /* ------------------------------------------------------------------ */
 
+/* Per-byte acks seen/missed, for the debug log only. */
+static struct {
+	unsigned int cmd_hit, cmd_miss, data_hit, data_miss;
+} jedi_mon_stats;
+
 /*
- * jedi_monitor_clear_pending() - equivalent to FUN_1004e3f4.
- * If REG_HOST_INT bit 0x4000 is already set, clear it before
- * starting a monitor transaction.
+ * Poll HOST_INT briefly for any bit in @mask. On a hit, ack with
+ * 0xffffffff. Returns 1 on hit, 0 on miss (not an error: per R2.3 WinCE
+ * does not act on missing per-byte acks), or a negative bus error.
  */
-static int jedi_monitor_clear_pending(struct sdio_func *func)
+static int jedi_poll_mask_ack(struct sdio_func *func, u16 mask)
 {
-	u32 status;
+	unsigned int i;
+	u16 status;
 	int ret;
 
-	ret = jedi_reg_read(func, JEDI_REG_HOST_INT, &status);
+	for (i = 0; i < JEDI_MON_POLL_MAX; i++) {
+		ret = jedi_host_int(func, &status);
+		if (ret)
+			return ret;
+		if (status & mask) {
+			ret = jedi_ack(func, 0xffffffff);
+			return ret ? ret : 1;
+		}
+		udelay(JEDI_MON_POLL_US);
+	}
+	return 0;
+}
+
+/* FUN_1004e3f4: if HOST_INT & 0x4000, write 0xffffffff to 0x48. */
+static int jedi_monitor_clear_pending(struct sdio_func *func)
+{
+	u16 status;
+	int ret;
+
+	ret = jedi_host_int(func, &status);
 	if (ret)
 		return ret;
-
 	if (status & JEDI_HOST_INT_BYTE_OK)
-		ret = jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 0xffffffff);
-
+		ret = jedi_ack(func, 0xffffffff);
 	return ret;
 }
 
 /*
- * jedi_monitor_flush() - equivalent to FUN_1004e448.
- * Triggers a TX-flush and waits until the TX buffer drains.
- * Used between the ASCII command string and the payload, and after
- * the payload.
+ * FUN_1004e448: loop { CTRL = 0x4000; read HOST_INT; if 0x8000 set, ack }
+ * until 0x8000 clears. Each time the chip raises 0x8000 it has a character
+ * for us at 0x50 (the monitor's output register); read it before acking.
+ * The monitor's text is only logged when debugging. A timeout is not fatal.
  */
-static int jedi_monitor_flush(struct sdio_func *func)
+static int jedi_monitor_flush(struct sdio_func *func, const char *where)
 {
-	u32 status;
-	int ret;
+	char text[33];
+	unsigned int n = 0, i;
+	u16 status = 0;
+	int ret, err;
 
-	do {
-		ret = jedi_reg_write(func, JEDI_REG_CTRL, JEDI_CTRL_FLUSH);
+	for (i = 0; i < JEDI_FLUSH_MAX; i++) {
+		ret = jedi_ctrl(func, JEDI_CTRL_FLUSH);
 		if (ret)
 			return ret;
-
-		ret = jedi_reg_read(func, JEDI_REG_HOST_INT, &status);
+		ret = jedi_host_int(func, &status);
 		if (ret)
 			return ret;
+		if (!(status & JEDI_HOST_INT_TX_BUSY))
+			break;
+		{
+			u8 b = sdio_readb(func, JEDI_REG_TX_READY, &err);
 
-		if (status & JEDI_HOST_INT_TX_BUSY) {
-			ret = jedi_reg_write(func, JEDI_REG_HOST_INT_ACK,
-					     0xffffffff);
-			if (ret)
-				return ret;
+			if (!err && n < sizeof(text) - 1)
+				text[n++] = (b >= 0x20 && b < 0x7f) ? b : '.';
 		}
-	} while (status & JEDI_HOST_INT_TX_BUSY);
+		ret = jedi_ack(func, 0xffffffff);
+		if (ret)
+			return ret;
+	}
+	text[n] = '\0';
+	jedi_dbg(func, "monitor reply [%s]: \"%s\"\n", where, text);
 
+	if (i == JEDI_FLUSH_MAX)
+		dev_warn(&func->dev,
+			 "jedi_fw: flush: TX_BUSY still set after %u "
+			 "iterations (HOST_INT=0x%04x), continuing\n",
+			 i, status);
 	return 0;
 }
 
 /*
- * jedi_monitor_send_cmd_byte() - equivalent to FUN_1004e61c.
- * Sends one byte of the ASCII command string to the monitor FIFO.
- * Non-critical path (ROM monitor buffers command bytes) — fires two
- * strobe/check sequences but does not abort on a missed ack.
+ * FUN_1004e61c -> FUN_1004e4b8: command-string byte.
+ *   write byte to 0x4c
+ *   CTRL=0x8000; wait HOST_INT&0x4000; ack
+ *   CTRL=0x4000; wait HOST_INT&0x8000; ack
+ *   read 0x50 (the monitor's echo)
+ * Misses are advisory.
  */
 static int jedi_monitor_send_cmd_byte(struct sdio_func *func, u8 byte)
 {
-	u32 status;
+	int ret, err;
+
+	ret = jedi_monitor_writeb(func, byte);
+	if (ret)
+		return ret;
+
+	ret = jedi_ctrl(func, JEDI_CTRL_BYTE_STROBE);
+	if (ret)
+		return ret;
+	ret = jedi_poll_mask_ack(func, JEDI_HOST_INT_BYTE_OK);
+	if (ret < 0)
+		return ret;
+	if (ret)
+		jedi_mon_stats.cmd_hit++;
+	else
+		jedi_mon_stats.cmd_miss++;
+
+	ret = jedi_ctrl(func, JEDI_CTRL_FLUSH);
+	if (ret)
+		return ret;
+	ret = jedi_poll_mask_ack(func, JEDI_HOST_INT_TX_BUSY);
+	if (ret < 0)
+		return ret;
+
+	(void)sdio_readb(func, JEDI_REG_TX_READY, &err);
+	return err;
+}
+
+/*
+ * FUN_1004e678 -> FUN_1004e584: payload byte.
+ *   write byte to 0x4c; CTRL=0x8000; check HOST_INT&0x4000; ack
+ * WinCE discards the result of this handshake (R2.3 correction), so a
+ * miss is only counted, never fatal.
+ */
+static int jedi_monitor_send_data_byte(struct sdio_func *func, u8 byte)
+{
 	int ret;
 
-	ret = jedi_reg_write(func, JEDI_REG_MONITOR_FIFO, byte);
+	ret = jedi_monitor_writeb(func, byte);
 	if (ret)
 		return ret;
 
-	/* First strobe/check — 0x8000 to 0x38, check 0x4000 in 0x40 */
-	ret = jedi_reg_write(func, JEDI_REG_CTRL, JEDI_CTRL_BYTE_STROBE);
+	ret = jedi_ctrl(func, JEDI_CTRL_BYTE_STROBE);
 	if (ret)
 		return ret;
-	ret = jedi_reg_read(func, JEDI_REG_HOST_INT, &status);
-	if (ret)
-		return ret;
-	if (status & JEDI_HOST_INT_BYTE_OK)
-		jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 0xffffffff);
-	/* missed ack on cmd bytes is non-fatal — fall through */
 
-	/* Second strobe/check — 0x4000 to 0x38, check 0x8000 in 0x40 */
-	ret = jedi_reg_write(func, JEDI_REG_CTRL, JEDI_CTRL_FLUSH);
-	if (ret)
+	ret = jedi_poll_mask_ack(func, JEDI_HOST_INT_BYTE_OK);
+	if (ret < 0)
 		return ret;
-	ret = jedi_reg_read(func, JEDI_REG_HOST_INT, &status);
-	if (ret)
-		return ret;
-	if (status & JEDI_HOST_INT_TX_BUSY)
-		jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 0xffffffff);
 
+	if (ret)
+		jedi_mon_stats.data_hit++;
+	else
+		jedi_mon_stats.data_miss++;
 	return 0;
 }
 
 /*
- * jedi_monitor_send_data_byte() - equivalent to FUN_1004e678.
- * Sends one payload byte to the monitor FIFO.
- * Strict path — returns an error if the byte-ok ack is not received,
- * matching WinCE's behaviour for the payload (every byte matters).
- */
-static int jedi_monitor_send_data_byte(struct sdio_func *func, u8 byte)
-{
-	u32 status;
-	int ret;
-
-	ret = jedi_reg_write(func, JEDI_REG_MONITOR_FIFO, byte);
-	if (ret)
-		return ret;
-
-	ret = jedi_reg_write(func, JEDI_REG_CTRL, JEDI_CTRL_BYTE_STROBE);
-	if (ret)
-		return ret;
-
-	ret = jedi_reg_read(func, JEDI_REG_HOST_INT, &status);
-	if (ret)
-		return ret;
-
-	if (!(status & JEDI_HOST_INT_BYTE_OK)) {
-		dev_err(&func->dev,
-			"jedi_fw: monitor payload byte 0x%02x not accepted "
-			"(HOST_INT=0x%x)\n", byte, status);
-		return -EIO;
-	}
-
-	return jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 0xffffffff);
-}
-
-/*
- * jedi_monitor_write() - send one monitor-path chunk to the chip's
- * ROM monitor. Equivalent to the flagged-address branch in
- * FUN_1004e6d0 (DownloadFirmware).
+ * jedi_monitor_write() -- R2.3 E, FUN_1004e6d0 flagged-chunk branch.
  *
- * The boot ROM monitor accepts a simple binary-upload command:
- *   "<XXXXXXXX YYY\r"  where XXXXXXXX is the hex target address and
- *                      YYY is the hex byte count
- * followed by the raw payload bytes and a trailing "1234" tag.
+ *  E.1  clear pending
+ *  E.2  32-bit unlock 0x12345678 to 0x4c..0x4f
+ *  E.3  clear pending
+ *  E.4  ASCII command, byte by byte (light handshake, advisory)
+ *  E.5  flush
+ *  E.6  payload, byte by byte (advisory acks)
+ *  E.7  "1234"
+ *  E.8  flush
+ *  E.9  DEVSTAT |= 0x30000000; DEVSTAT &= ~0x10000000
+ *  E.10 wait HOST_INT&0x2000, ack 0x2000  <-- the ONLY fatal check
  *
- * All communication goes through register 0x4c (monitor FIFO), one
- * byte at a time, with strobing via register 0x38 and handshaking via
- * REG_HOST_INT (0x40)/REG_HOST_INT_ACK (0x48).
+ * Note the command claims 0x9d4 bytes but, like WinCE, we send only the
+ * chunk's own 2488 bytes plus "1234" and then reset into RAM boot: the
+ * monitor never completes the command and that is fine. Padding to the
+ * claimed length does not help.
+ *
+ * Must be preceded by jedi_chip_reset() so the boot ROM is running.
  */
 static int jedi_monitor_write(struct sdio_func *func,
-			      u32 target_addr, const u8 *data, u32 len)
+			      const u8 *data, u32 len)
 {
-	/* Monitor command string fields, hard-coded per WinCE:
-	 *   address = 0x1ffe0000 (boot ROM trampoline location)
-	 *   count   = len in hex
-	 * WinCE hard-codes these as literal ASCII arrays in FUN_1004e6d0. */
-	char cmd[32];
-	u32 status;
-	u32 i;
+	static const char cmd[] = JEDI_MONITOR_CMD;
+	static const char tag[] = "1234";
+	u32 ds = 0;
+	u16 status = 0;
+	unsigned int i;
 	int ret;
 
-	dev_info(&func->dev,
-		 "jedi_fw: monitor path: writing %u bytes to 0x%08x\n",
-		 len, target_addr);
+	memset(&jedi_mon_stats, 0, sizeof(jedi_mon_stats));
 
-	/* Step 1: clear any pending interrupt state */
+	/* E.1 */
 	ret = jedi_monitor_clear_pending(func);
 	if (ret)
 		return ret;
 
-	/* Step 2: send the 32-bit unlock magic to register 0x4c.
-	 * This transitions the boot ROM from idle to monitor mode. */
-	ret = jedi_reg_write(func, JEDI_REG_MONITOR_FIFO, 0x12345678);
+	/* E.2 */
+	ret = jedi_reg_write(func, JEDI_REG_MONITOR_FIFO, 4, 0x12345678);
 	if (ret) {
 		dev_err(&func->dev,
 			"jedi_fw: monitor unlock write failed: %d\n", ret);
 		return ret;
 	}
 
-	/* Step 3: clear pending again after unlock */
+	/* E.3 */
 	ret = jedi_monitor_clear_pending(func);
 	if (ret)
 		return ret;
 
-	/* Step 4: send ASCII command string byte by byte.
-	 * Format: "<XXXXXXXX YYY\r" matching WinCE's literal string.
-	 * WinCE uses the hardcoded address 0x1ffe0000 and derives the
-	 * count from the chunk length field. */
-	snprintf(cmd, sizeof(cmd), "<%08x %x\r", target_addr, len);
-	dev_dbg(&func->dev, "jedi_fw: monitor command: %s", cmd);
-
+	/* E.4 */
 	for (i = 0; cmd[i] != '\0'; i++) {
 		ret = jedi_monitor_send_cmd_byte(func, cmd[i]);
-		if (ret)
+		if (ret) {
+			dev_err(&func->dev,
+				"jedi_fw: command byte %u failed: %d\n", i, ret);
 			return ret;
+		}
 	}
+	jedi_dbg(func, "monitor command: %u/%u bytes acked\n",
+		 jedi_mon_stats.cmd_hit,
+		 jedi_mon_stats.cmd_hit + jedi_mon_stats.cmd_miss);
 
-	/* Step 5: flush — signals end of command line */
-	ret = jedi_monitor_flush(func);
+	/* E.5 */
+	ret = jedi_monitor_flush(func, "after cmd");
 	if (ret)
 		return ret;
 
-	/* Step 6: send payload bytes one at a time */
+	/* E.6 */
 	for (i = 0; i < len; i++) {
 		ret = jedi_monitor_send_data_byte(func, data[i]);
 		if (ret) {
 			dev_err(&func->dev,
-				"jedi_fw: monitor payload failed at byte %u/%u\n",
-				i, len);
+				"jedi_fw: monitor payload bus error at "
+				"byte %u/%u: %d\n", i, len, ret);
+			jedi_dump_regs(func, "payload failure");
+			return ret;
+		}
+	}
+	jedi_dbg(func, "monitor payload: %u acked, %u missed (advisory)\n",
+		 jedi_mon_stats.data_hit, jedi_mon_stats.data_miss);
+
+	/* E.7 */
+	for (i = 0; tag[i] != '\0'; i++) {
+		ret = jedi_monitor_send_data_byte(func, tag[i]);
+		if (ret) {
+			dev_err(&func->dev,
+				"jedi_fw: monitor trailing tag failed: %d\n", ret);
 			return ret;
 		}
 	}
 
-	/* Step 7: send trailing "1234" tag (ASCII, byte-by-byte) */
-	ret  = jedi_monitor_send_data_byte(func, '1');
-	ret |= jedi_monitor_send_data_byte(func, '2');
-	ret |= jedi_monitor_send_data_byte(func, '3');
-	ret |= jedi_monitor_send_data_byte(func, '4');
+	/* E.8 */
+	ret = jedi_monitor_flush(func, "after payload");
+	if (ret)
+		return ret;
+
+	/* E.9: leaves RAMBOOT (0x20000000) set, RESET released. */
+	ret = jedi_devstat_rmw(func, JEDI_DEVSTAT_RESET | JEDI_DEVSTAT_RAMBOOT,
+			       0, &ds);
+	if (ret)
+		return ret;
+	ret = jedi_devstat_rmw(func, 0, JEDI_DEVSTAT_RESET, &ds);
+	if (ret)
+		return ret;
+
+	/* E.10: the only fatal check in the monitor path. */
+	ret = jedi_wait_host_int(func, JEDI_HOST_INT_BULK_OK,
+				 JEDI_MON_DONE_TIMEOUT_MS, &status);
+	if (ret == -ETIMEDOUT) {
+		dev_err(&func->dev,
+			"jedi_fw: monitor image NOT accepted: HOST_INT 0x2000 "
+			"never set (last HOST_INT=0x%04x)\n", status);
+		jedi_dump_regs(func, "monitor timeout");
+		return ret;
+	}
+	if (ret)
+		return ret;
+
+	ret = jedi_ack(func, JEDI_HOST_INT_BULK_OK);
+	if (ret)
+		return ret;
+
+	jedi_dbg(func, "monitor image accepted (HOST_INT=0x%04x)\n", status);
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Boot confirmation (R2.4)                                            */
+/* ------------------------------------------------------------------ */
+
+/*
+ * After the last chunk WinCE writes INT_ENABLE = 0xFFFF and waits up to
+ * 10 s for HOST_INT bit 0x0001 ("FW Init"). We poll instead of using the
+ * SDIO IRQ, so no interrupt handler needs to exist yet.
+ */
+static int jedi_wait_fw_boot(struct sdio_func *func)
+{
+	unsigned long deadline = jiffies + msecs_to_jiffies(JEDI_BOOT_TIMEOUT_MS);
+	u16 status = 0;
+	int ret;
+
+	ret = jedi_reg_write(func, JEDI_REG_INT_ENABLE, 2, 0xffff);
 	if (ret) {
-		dev_err(&func->dev, "jedi_fw: monitor trailing tag failed\n");
+		dev_err(&func->dev, "jedi_fw: INT_ENABLE write failed: %d\n",
+			ret);
 		return ret;
 	}
 
-	/* Step 8: final flush */
-	ret = jedi_monitor_flush(func);
-	if (ret)
-		return ret;
+	do {
+		ret = jedi_host_int(func, &status);
+		if (ret)
+			return ret;
 
-	/* Step 9: register 0x54 toggle: read, OR 0x30000000, write;
-	 * AND 0xefffffff, write; read.
-	 * Signals to the boot ROM that the upload is complete. */
-	ret = jedi_reg_read(func, JEDI_REG_TRIGGER, &status);
-	if (ret)
-		return ret;
-	status |= 0x30000000;
-	ret = jedi_reg_write(func, JEDI_REG_TRIGGER, status);
-	if (ret)
-		return ret;
-	status &= 0xefffffff;
-	ret = jedi_reg_write(func, JEDI_REG_TRIGGER, status);
-	if (ret)
-		return ret;
-	ret = jedi_reg_read(func, JEDI_REG_TRIGGER, &status);
+		if (status & JEDI_HOST_INT_FW_INIT) {
+			ret = jedi_reg_write(func, JEDI_REG_HOST_INT_ACK, 2,
+					     status);
+			dev_info(&func->dev, "jedi_fw: firmware booted\n");
+			return ret;
+		}
+		msleep(10);
+	} while (time_before(jiffies, deadline));
 
-	if (!ret)
-		dev_info(&func->dev, "jedi_fw: monitor write complete\n");
-
-	return ret;
+	dev_err(&func->dev,
+		"jedi_fw: no FW Init within %u ms (last HOST_INT=0x%04x)\n",
+		JEDI_BOOT_TIMEOUT_MS, status);
+	jedi_dump_regs(func, "boot timeout");
+	return -ETIMEDOUT;
 }
 
 /* ------------------------------------------------------------------ */
-/* debugfs monitor interface                                           */
+/* Firmware blob access                                                */
 /* ------------------------------------------------------------------ */
 
-#ifdef CONFIG_DEBUG_FS
-
-/*
- * The debugfs interface exposes the ROM monitor as a simple write-only
- * file: /sys/kernel/debug/jedi_fw/monitor_write
- *
- * Write a binary blob to this file to send it via jedi_monitor_write()
- * at the hardcoded boot-ROM address (0x1ffe0000). This is useful for
- * diagnostics before firmware boots — once firmware is running the
- * monitor is no longer available.
- *
- * Usage (from shell, after modprobe with chip in pre-boot state):
- *   cat vector_table.bin > /sys/kernel/debug/jedi_fw/monitor_write
- */
-
-static struct sdio_func *jedi_debug_func;
-static struct dentry *jedi_debugfs_dir;
-
-static ssize_t jedi_dbg_monitor_write(struct file *file,
-				      const char __user *ubuf,
-				      size_t count, loff_t *pos)
-{
-	u8 *buf;
-	int ret;
-
-	if (!jedi_debug_func)
-		return -ENODEV;
-
-	if (count == 0 || count > 0x10000)
-		return -EINVAL;
-
-	buf = memdup_user(ubuf, count);
-	if (IS_ERR(buf))
-		return PTR_ERR(buf);
-
-	sdio_claim_host(jedi_debug_func);
-	ret = jedi_monitor_write(jedi_debug_func, 0x1ffe0000, buf, count);
-	sdio_release_host(jedi_debug_func);
-
-	kfree(buf);
-	return ret ? ret : count;
-}
-
-static const struct file_operations jedi_dbg_monitor_fops = {
-	.owner	= THIS_MODULE,
-	.write	= jedi_dbg_monitor_write,
-	.llseek	= no_llseek,
+static const char * const jedi_blob_dirs[] = {
+	"/system/etc/firmware/", "/etc/firmware/", "/vendor/firmware/",
+	"/lib/firmware/",
 };
 
-void jedi_debugfs_init(struct sdio_func *func)
+static int jedi_blob_read_file(struct sdio_func *func, const char *name,
+			       struct jedi_blob *b)
 {
-	jedi_debug_func = func;
-	jedi_debugfs_dir = debugfs_create_dir("jedi_fw", NULL);
-	if (!IS_ERR_OR_NULL(jedi_debugfs_dir))
-		debugfs_create_file("monitor_write", 0200, jedi_debugfs_dir,
-				    NULL, &jedi_dbg_monitor_fops);
-}
-EXPORT_SYMBOL_GPL(jedi_debugfs_init);
+	unsigned int i;
 
-void jedi_debugfs_remove(void)
+	for (i = 0; i < ARRAY_SIZE(jedi_blob_dirs); i++) {
+		char path[64];
+		struct file *f;
+		loff_t pos = 0, size;
+		mm_segment_t old_fs;
+		u8 *buf;
+		ssize_t n;
+
+		snprintf(path, sizeof(path), "%s%s", jedi_blob_dirs[i], name);
+		f = filp_open(path, O_RDONLY, 0);
+		if (IS_ERR(f))
+			continue;
+		size = i_size_read(f->f_path.dentry->d_inode);
+		if (size <= 0 || size > (8 << 20)) {
+			filp_close(f, NULL);
+			continue;
+		}
+		buf = vmalloc(size);
+		if (!buf) {
+			filp_close(f, NULL);
+			return -ENOMEM;
+		}
+		old_fs = get_fs();
+		set_fs(KERNEL_DS);
+		n = vfs_read(f, (char __user *)buf, size, &pos);
+		set_fs(old_fs);
+		filp_close(f, NULL);
+		if (n != size) {
+			vfree(buf);
+			continue;
+		}
+		b->buf = buf;
+		b->data = buf;
+		b->size = size;
+		if (jedi_debug)
+		dev_info(&func->dev, "jedi_fw: read %s directly (%zu bytes)\n",
+			 path, b->size);
+		return 0;
+	}
+	return -ENOENT;
+}
+
+int jedi_blob_get(struct sdio_func *func, const char *name,
+		  struct jedi_blob *b, bool prefer_file)
 {
-	debugfs_remove_recursive(jedi_debugfs_dir);
-	jedi_debugfs_dir = NULL;
-	jedi_debug_func = NULL;
+	int ret;
+
+	memset(b, 0, sizeof(*b));
+	if (prefer_file && !jedi_blob_read_file(func, name, b))
+		return 0;
+	ret = request_firmware(&b->fw, name, &func->dev);
+	if (!ret) {
+		b->data = b->fw->data;
+		b->size = b->fw->size;
+		return 0;
+	}
+	b->fw = NULL;
+	dev_warn(&func->dev, "jedi_fw: request_firmware(%s) failed: %d\n",
+		 name, ret);
+	if (!prefer_file && !jedi_blob_read_file(func, name, b))
+		return 0;
+	return ret;
 }
-EXPORT_SYMBOL_GPL(jedi_debugfs_remove);
+EXPORT_SYMBOL_GPL(jedi_blob_get);
 
-#else /* !CONFIG_DEBUG_FS */
-
-void jedi_debugfs_init(struct sdio_func *func) {}
-void jedi_debugfs_remove(void) {}
-
-#endif /* CONFIG_DEBUG_FS */
+void jedi_blob_put(struct jedi_blob *b)
+{
+	if (b->fw)
+		release_firmware(b->fw);
+	if (b->buf)
+		vfree(b->buf);
+	memset(b, 0, sizeof(*b));
+}
+EXPORT_SYMBOL_GPL(jedi_blob_put);
 
 /* ------------------------------------------------------------------ */
 /* Main entry point                                                    */
 /* ------------------------------------------------------------------ */
 
+#define JEDI_FW_LOAD_TRIES	5
+
+/* Walk the chunk list without touching the chip: every chunk header must fit
+ * and every chunk must end inside the file, and the last must end exactly at
+ * its end. */
+static int jedi_fw_validate(struct sdio_func *func, const struct jedi_blob *fw)
+{
+	const u8 *pos = fw->data, *end = fw->data + fw->size;
+	unsigned int n = 0;
+
+	while (pos < end) {
+		const struct jedi_fw_chunk *c;
+		u32 len;
+
+		if ((size_t)(end - pos) < sizeof(*c))
+			return -EINVAL;
+		c = (const struct jedi_fw_chunk *)pos;
+		len = le32_to_cpu(c->length);
+		if (len > (size_t)(end - pos) - sizeof(*c))
+			return -EINVAL;
+		pos += sizeof(*c) + len;
+		n++;
+	}
+	return n ? 0 : -EINVAL;
+}
+
 /*
- * jedi_fw_download() - parse and push the full firmware image.
+ * jedi_fw_download() - reset the chip into its boot ROM, push the full
+ * firmware image, and wait for the firmware to report FW Init.
  *
  * Use the raw chunked container JEDI10_dll.bin (headers intact) placed
- * at /lib/firmware/jedi_fw.bin. Do NOT use cx50222_firmware.bin — that
- * is the stripped/flattened Ghidra-analysis image with headers removed.
+ * at /lib/firmware/jedi_fw.bin. Do NOT use cx50222_firmware.bin.
+ *
+ * The caller must NOT hold the SDIO host; function 1 must be enabled and
+ * the block size set. Returns 0 only once the firmware has booted. The
+ * SDIO function IRQ should be claimed AFTER this returns.
  */
 int jedi_fw_download(struct sdio_func *func)
 {
-	const struct firmware *fw;
+	struct jedi_blob fwb, *fw = &fwb;
+	bool have = false;
 	const u8 *pos, *end;
-	unsigned int chunk_num = 0;
+	unsigned int chunk_num = 0, try;
 	int ret;
 
-	ret = request_firmware(&fw, JEDI_FW_NAME, &func->dev);
-	if (ret) {
-		dev_err(&func->dev,
-			"jedi_fw: request_firmware(%s) failed: %d\n",
-			JEDI_FW_NAME, ret);
-		return ret;
+	/*
+	 * Android runs ueventd next to whatever Buildroot's hotplug helper is
+	 * still set; two firmware loaders racing on the same request produce an
+	 * image with garbage in it ("firmware_loading_store: unexpected value
+	 * (0)"). The chip has not been touched yet, so check the container and
+	 * simply ask for the image again if it is damaged.
+	 */
+	for (try = 0; try < JEDI_FW_LOAD_TRIES; try++) {
+		/* Read the file ourselves first; the firmware loader is the
+		 * fallback (it is the unreliable one on Android). */
+		ret = jedi_blob_get(func, JEDI_FW_NAME, fw, true);
+		if (ret) {
+			dev_err(&func->dev,
+				"jedi_fw: cannot load %s: %d\n",
+				JEDI_FW_NAME, ret);
+			return ret;
+		}
+		if (!jedi_fw_validate(func, fw)) {
+			have = true;
+			break;
+		}
+		dev_warn(&func->dev,
+			 "jedi_fw: firmware image is damaged (try %u/%u), "
+			 "loading it again\n", try + 1, JEDI_FW_LOAD_TRIES);
+		print_hex_dump(KERN_WARNING, "jedi_fw: head ", DUMP_PREFIX_OFFSET,
+			       16, 1, fw->data, min_t(size_t, fw->size, 32), false);
+		jedi_blob_put(fw);
+		msleep(500);
 	}
+	if (!have)
+		return -EINVAL;
 
 	pos = fw->data;
 	end = fw->data + fw->size;
 
-	dev_info(&func->dev, "jedi_fw: starting download, %zu bytes\n",
+	if (jedi_debug)
+		dev_info(&func->dev, "jedi_fw: downloading firmware (%zu bytes)\n",
 		 fw->size);
+	jedi_dbg(func, "func1 max_blksize=%u cur_blksize=%u\n",
+		 func->max_blksize, func->cur_blksize);
 
 	sdio_claim_host(func);
+
+	ret = jedi_chip_reset(func);
+	if (ret) {
+		dev_err(&func->dev, "jedi_fw: chip reset failed: %d\n", ret);
+		goto out;
+	}
 
 	while (pos < end) {
 		const struct jedi_fw_chunk *chunk;
 		u32 addr, len;
 		bool monitor;
 
-		if (end - pos < (ptrdiff_t)sizeof(*chunk)) {
+		if ((size_t)(end - pos) < sizeof(*chunk)) {
 			dev_err(&func->dev,
 				"jedi_fw: truncated header at file offset %td\n",
 				pos - fw->data);
@@ -587,37 +888,27 @@ int jedi_fw_download(struct sdio_func *func)
 		len   = le32_to_cpu(chunk->length);
 		monitor = !!(addr & JEDI_CHUNK_MONITOR_FLAG);
 
-		if (end - pos < (ptrdiff_t)(sizeof(*chunk) + len)) {
+		/* Compared this way round so a huge len cannot wrap. */
+		if (len > (size_t)(end - pos) - sizeof(*chunk)) {
 			dev_err(&func->dev,
 				"jedi_fw: chunk %u claims %u bytes but only "
-				"%td remain\n",
+				"%zu remain\n",
 				chunk_num, len,
-				end - pos - (ptrdiff_t)sizeof(*chunk));
+				(size_t)(end - pos) - sizeof(*chunk));
 			ret = -EINVAL;
 			goto out;
 		}
 
-		dev_info(&func->dev,
-			 "jedi_fw: chunk %u: addr=0x%08x len=%u%s\n",
-			 chunk_num, addr, len,
-			 monitor ? " [monitor path]" : "");
+		jedi_dbg(func, "chunk %u: addr=0x%08x len=%u%s\n",
+			 chunk_num, addr, len, monitor ? " [monitor path]" : "");
 
-		if (monitor) {
-			if (jedi_fw_skip_monitor) {
-				dev_warn(&func->dev,
-					 "jedi_fw: SKIPPING monitor chunk "
-					 "%u — diagnostic mode, chip will "
-					 "NOT boot\n", chunk_num);
-				ret = 0;
-			} else {
-				ret = jedi_monitor_write(func,
-					0x1ffe0000,	chunk->payload, len);
-			}
-		} else {
-			ret = jedi_download_chunk(func, chunk->payload,
-						  len, chunk_num);
-		}
-
+		if (monitor)
+			ret = jedi_monitor_write(func, chunk->payload, len);
+		else
+			ret = jedi_download_chunk(func, chunk->payload, len,
+						  chunk_num,
+						  (size_t)(end - pos) ==
+						  sizeof(*chunk) + len);
 		if (ret)
 			goto out;
 
@@ -625,14 +916,29 @@ int jedi_fw_download(struct sdio_func *func)
 		chunk_num++;
 	}
 
-	dev_info(&func->dev,
-		 "jedi_fw: download complete (%u chunks, %zu bytes)\n",
+	jedi_dbg(func, "download complete (%u chunks, %zu bytes)\n",
 		 chunk_num, fw->size);
-	ret = 0;
+
+	ret = jedi_wait_fw_boot(func);
 
 out:
 	sdio_release_host(func);
-	release_firmware(fw);
+	jedi_blob_put(fw);
 	return ret;
 }
 EXPORT_SYMBOL_GPL(jedi_fw_download);
+/*
+ * Wi-Fi off: park the chip in its boot ROM. The firmware stops, the radio
+ * is down and the chip idles, while the SDIO card stays enumerated, so
+ * reloading jedi.ko just downloads the firmware again (no power cut, no
+ * MMC re-enumeration).
+ */
+int jedi_fw_halt(struct sdio_func *func)
+{
+	int ret;
+
+	sdio_claim_host(func);
+	ret = jedi_chip_reset(func);
+	sdio_release_host(func);
+	return ret;
+}

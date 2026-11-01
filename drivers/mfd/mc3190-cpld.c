@@ -18,6 +18,8 @@
 */
 
 #include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
@@ -27,6 +29,51 @@
 
 static void __iomem *cpld_base;
 static DEFINE_SPINLOCK(cpld_lock);
+
+static int cpld_irq;
+
+static void mc3190_cpld_irq_noop(unsigned int irq) { }
+
+static struct irq_chip mc3190_btuart_irq_chip = {
+    .name   = "cpld-btuart",
+    .ack    = mc3190_cpld_irq_noop,
+    .mask   = mc3190_cpld_irq_noop,
+    .unmask = mc3190_cpld_irq_noop,
+};
+
+static void mc3190_usb_work_fn(struct work_struct *w)
+{
+	pxa_udc_cable_event(!!(mc3190_cpld_read(MC3190_CPLD_REG_USB_STATUS) &
+			       MC3190_CPLD_USB_CONNECTED_BIT));
+}
+static DECLARE_WORK(mc3190_usb_work, mc3190_usb_work_fn);
+
+static irqreturn_t mc3190_cpld_isr(int irq, void *dev_id)
+{
+    u32 status;
+    int loops = 0;
+
+	while ((status = readl(cpld_base + MC3190_CPLD_REG_ISR))) {
+#ifdef CONFIG_MFD_MC3190_CPLD_DEBUG
+        if (status & ~MC3190_CPLD_ISR_MASK)
+			pr_info("cpld-isr: unhandled bits 0x%08x\n",
+				status & ~MC3190_CPLD_ISR_MASK);
+#endif
+
+		writel(status, cpld_base + MC3190_CPLD_REG_ISR);
+
+		if (status & MC3190_CPLD_ISR_BTUART_BIT)
+			generic_handle_irq(IRQ_MC3190_BTUART);
+		if (status & MC3190_CPLD_ISR_USB_BIT)
+			schedule_work(&mc3190_usb_work);
+
+		if (++loops > 16) {
+			pr_err("cpld-isr: status 0x%08x won't clear\n", status);
+			break;
+		}
+	}
+    return IRQ_HANDLED;
+}
 
 u16 mc3190_cpld_read(unsigned int reg)
 {
@@ -136,7 +183,7 @@ EXPORT_SYMBOL_GPL(mc3190_cpld_regoff_wait);
 
 static int __devinit mc3190_cpld_probe(struct platform_device *pdev)
 {
-    struct resource *res;
+    struct resource *res, *irq_res;
     u16 ret;
     u16 majorVersion;
     u16 minorVersion;
@@ -159,11 +206,30 @@ static int __devinit mc3190_cpld_probe(struct platform_device *pdev)
         return -ENOMEM;
     }
 
+    irq_res = platform_get_resource(pdev, IORESOURCE_IRQ, 0);
+
+    if (!irq_res) {
+        dev_warn(&pdev->dev, "No IRQ resource; CPLD interrupt unavailable\n");
+    } else {
+        int err;
+
+        cpld_irq = irq_res->start;
+        set_irq_chip_and_handler(IRQ_MC3190_BTUART, &mc3190_btuart_irq_chip, handle_simple_irq);
+        set_irq_flags(IRQ_MC3190_BTUART, IRQF_VALID);
+
+        writel(readl(cpld_base + MC3190_CPLD_REG_ISR) & MC3190_CPLD_ISR_MASK,
+            cpld_base + MC3190_CPLD_REG_ISR);
+
+        err = request_irq(cpld_irq, mc3190_cpld_isr, IRQF_TRIGGER_RISING, "cpld-isr", NULL);
+        if (err)
+        dev_err(&pdev->dev, "Failed to request CPLD IRQ %d: %d\n", cpld_irq, err);
+    }
+
     ret = mc3190_cpld_read(MC3190_CPLD_REG_VERSION);
     majorVersion = (ret & 0xFF) >> 5;
     minorVersion = (ret & 0x1F);
 
-    dev_info(&pdev->dev, "MC3190 CPLD driver ready (CPLD version: %d.%d)\n", majorVersion, minorVersion);
+    dev_info(&pdev->dev, "MC3190 CPLD driver ready at IRQ %d (CPLD version: %d.%d)\n", cpld_irq, majorVersion, minorVersion);
     return 0;
 }
 
@@ -174,6 +240,9 @@ static int __devexit mc3190_cpld_remove(struct platform_device *pdev)
     iounmap(cpld_base);
     if (res)
         release_mem_region(res->start, resource_size(res));
+
+    free_irq(cpld_irq, NULL);
+    cancel_work_sync(&mc3190_usb_work);
 
     return 0;
 }

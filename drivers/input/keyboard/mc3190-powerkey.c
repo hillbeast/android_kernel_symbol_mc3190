@@ -78,8 +78,12 @@ static int __init mc3190_pwrkey_init(void)
 
     ret = request_threaded_irq(pwrkey_irq, NULL, mc3190_pwrkey_irq_handler,
                                IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_ONESHOT,
-                               
                                "mc3190-pwrkey", NULL);
+
+    ret = enable_irq_wake(pwrkey_irq);
+    if (ret)
+        pr_warn("mc3190_pwrkey: enable_irq_wake failed (%d)\n", ret);
+
     if (ret) {
         input_unregister_device(pwrkey_input_dev);
         iounmap(spmu_base);

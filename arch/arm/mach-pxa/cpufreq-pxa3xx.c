@@ -224,8 +224,15 @@ static __init int pxa3xx_cpufreq_init(struct cpufreq_policy *policy)
 		pr_err("failed to setup frequency table\n");
 		return ret;
 	}
+	cpufreq_frequency_table_get_attr(pxa3xx_freqs_table, policy->cpu);
 
 	pr_info("CPUFREQ support for PXA3xx initialized\n");
+	return 0;
+}
+
+static int pxa3xx_cpufreq_exit(struct cpufreq_policy *policy)
+{
+	cpufreq_frequency_table_put_attr(policy->cpu);
 	return 0;
 }
 
@@ -233,6 +240,7 @@ static struct cpufreq_driver pxa3xx_cpufreq_driver = {
 	.verify		= pxa3xx_cpufreq_verify,
 	.target		= pxa3xx_cpufreq_set,
 	.init		= pxa3xx_cpufreq_init,
+	.exit		= pxa3xx_cpufreq_exit,
 	.get		= pxa3xx_cpufreq_get,
 	.name		= "pxa3xx-cpufreq",
 };

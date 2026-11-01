@@ -14,6 +14,7 @@
 
 #include <linux/delay.h>
 #include <linux/gpio.h>
+#include <linux/gpio_keys.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -21,7 +22,6 @@
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <linux/spi/spi.h>
-#include <linux/usb/android_composite.h>
 
 #include <asm/mach-types.h>
 #include <asm/mach/arch.h>
@@ -120,7 +120,9 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 
 	/* Keypad */
 	GPIO105_KP_DKIN_0 | MFP_LPM_EDGE_BOTH,
-	GPIO106_KP_DKIN_1 | MFP_LPM_EDGE_BOTH,
+	GPIO106_GPIO, // GPIO106_KP_DKIN_1 | MFP_LPM_EDGE_BOTH,
+	GPIO107_GPIO, // GPIO107_KP_DKIN_2 | MFP_LPM_EDGE_BOTH,
+	GPIO108_GPIO, // GPIO108_KP_DKIN_3 | MFP_LPM_EDGE_BOTH,
 	GPIO113_KP_MKIN_0 | MFP_LPM_EDGE_BOTH,
 	GPIO114_KP_MKIN_1 | MFP_LPM_EDGE_BOTH,
 	GPIO115_KP_MKIN_2 | MFP_LPM_EDGE_BOTH,
@@ -198,7 +200,7 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	/* GPIOs or unused pins */
 	GPIO1_GPIO,
 	GPIO5_GPIO,
-	GPIO6_GPIO,
+	GPIO6_GPIO,											// USB Host Power
 	GPIO7_GPIO,
 	GPIO8_GPIO | MFP_LPM_EDGE_BOTH | MFP_PULL_HIGH,		// USB_OTG IRQ
 	GPIO9_GPIO | MFP_LPM_EDGE_FALL,						// CPLD IRQ
@@ -211,7 +213,7 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	GPIO36_GPIO,										// Unused AC97 pin. Could be used as GPIO
 	GPIO57_GPIO,										// Barcode Scanner (unsure on purpose)
 //	GPIO58_GPIO,						// Not set in Windows. Linux does not have definition for this GPIO
-	GPIO84_GPIO,						// USB_OTG (TBC)
+	GPIO84_GPIO,										// USB OTG Select
 	GPIO97_GPIO,
 	GPIO98_GPIO,
 	GPIO0_2_GPIO,
@@ -238,6 +240,12 @@ static struct resource mc3190_cpld_resources[] = {
         .end    	= MC3190_CPLD_BASE + MC3190_CPLD_SZ - 1,
         .flags  	= IORESOURCE_MEM,
     },
+    {
+		.start		= gpio_to_irq(9),
+		.end		= gpio_to_irq(9),
+		.flags		= IORESOURCE_IRQ,
+	},
+
 };
 
 static struct platform_device mc3190_cpld_device = {
@@ -280,15 +288,6 @@ static struct platform_device mc3190_device_leds = {
 	}
 };
 
-static struct platform_device mc3190_backlight_device = {
-	.name	= "mc3190-backlight",
-	.id	= -1,
-	.dev	= {
-		.parent = &pxa27x_device_pwm0.dev,
-		.platform_data = &mc3190_backlight_data,
-	},
-};
-
 static struct spi_board_info mc3190_lcd_spi_board_info[] __initdata = {
 	{
 		.modalias		= "mc3190-lcd-panel",
@@ -296,6 +295,7 @@ static struct spi_board_info mc3190_lcd_spi_board_info[] __initdata = {
 		.chip_select	= 0,
 		.max_speed_hz	= 1000000,
 		.mode			= SPI_MODE_0,
+		.platform_data	= &mc3190_backlight_data,
 	},
 };
 
@@ -328,8 +328,6 @@ static struct pxafb_mach_info mc3190_lcd_info = {
 
 static void __init mc3190_init_lcd(void)
 {
-	platform_device_register(&mc3190_backlight_device);
-
 	set_pxa_fb_info(&mc3190_lcd_info);
 }
 
@@ -346,7 +344,7 @@ static struct resource mc3190_ssp4_resources[] = {
 	},
 };
 
-static struct platform_device mc3190_pwrmicro_device = {		// FIXME: Rename the driver to pwrmicro
+static struct platform_device mc3190_pwrmicro_device = {
 	.name          = "mc3190-pwrmicro",
 	.id            = -1,
 	.resource      = mc3190_ssp4_resources,
@@ -354,6 +352,11 @@ static struct platform_device mc3190_pwrmicro_device = {		// FIXME: Rename the d
 };
 
 #if defined(CONFIG_MMC)
+
+static DEFINE_MUTEX(mc3190_wifi_pwr_lock);
+static bool mc3190_wifi_powered;		/* was 'static bool powered' inside setpower */
+static struct mmc_host *mc3190_wifi_host;
+
 static int mc3190_mci_init(struct device *dev, irq_handler_t detect_int, void *data)
 {
 	struct mmc_host *mmc = dev_get_drvdata(dev);
@@ -363,24 +366,94 @@ static int mc3190_mci_init(struct device *dev, irq_handler_t detect_int, void *d
 		mmc->caps |= MMC_CAP_NONREMOVABLE;
 	}
 
+	mc3190_wifi_host = data;
+
 	return 0;
+}
+
+#define MC3190_WIFI_T1_MS	100	/* PowerSettlingDelay */
+#define MC3190_WIFI_T2_MS	150	/* ResetPulseWidth */
+#define MC3190_WIFI_T3_MS	50	/* InterResetDelay */
+
+static void __mc3190_mci_setpower(unsigned int vdd)
+{
+	if (vdd && !mc3190_wifi_powered) {		/* Power On */
+		mc3190_cpld_regon(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+		mc3190_cpld_regon(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
+		msleep(MC3190_WIFI_T1_MS);
+		msleep(MC3190_WIFI_T2_MS);
+		mc3190_cpld_regoff(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+
+		/* AdditionalResets = 1 */
+		msleep(MC3190_WIFI_T3_MS);
+		mc3190_cpld_regon(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+		msleep(MC3190_WIFI_T2_MS);
+		mc3190_cpld_regoff(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+
+		/* PostResetDelay (T4) = 0 on this device */
+		mc3190_wifi_powered = true;
+	} else if (!vdd && mc3190_wifi_powered) {	/* Power Off */
+		mc3190_cpld_regon(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
+		mc3190_cpld_regoff(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
+		mc3190_wifi_powered = false;
+	}
 }
 
 static void mc3190_mci_setpower(struct device *dev, unsigned int vdd)
 {
-    if (vdd) {	// Power On
-        mc3190_cpld_regon(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
-        mc3190_cpld_regon(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
-        msleep(50);
-
-        mc3190_cpld_regoff(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
-        msleep(100);
-    } else {	// Power Off
-        mc3190_cpld_regoff(MC3190_CPLD_WIFI_RESET_BIT, MC3190_CPLD_REG_WIFI_CTRL);
-        mc3190_cpld_regoff(MC3190_CPLD_WIFI_PWR_BIT, MC3190_CPLD_REG_WIFI_PWR);
-        msleep(50);
-    }
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	__mc3190_mci_setpower(vdd);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
 }
+
+void mc3190_wifi_power_off(void)
+{
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	__mc3190_mci_setpower(0);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
+}
+EXPORT_SYMBOL_GPL(mc3190_wifi_power_off);
+
+void mc3190_wifi_power_on(void)
+{
+	bool was_off;
+	struct mmc_host *host = mc3190_wifi_host;
+	struct mmc_card *old = NULL;
+ 
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	was_off = !mc3190_wifi_powered;
+	if (was_off)
+		__mc3190_mci_setpower(MMC_VDD_33_34);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
+ 
+	pr_info("mc3190: wifi power on: was_off=%d host=%p\n", was_off, host);
+	if (!was_off || !host)
+		return;
+ 
+	old = host->card;
+	mmc_detect_change(host, 0);
+	flush_delayed_work(&host->detect);
+	pr_info("mc3190: card %p -> %p after detect\n", old, host->card);
+ 
+	if (!host->card || host->card == old) {
+		pr_warn("mc3190: card not re-enumerated, forcing host remove/add\n");
+		mmc_remove_host(host);
+		mmc_add_host(host);
+		flush_delayed_work(&host->detect);
+		pr_info("mc3190: card now %p\n", host->card);
+	}
+}
+EXPORT_SYMBOL_GPL(mc3190_wifi_power_on);
+
+void mc3190_wifi_power_cycle(void)
+{
+	mutex_lock(&mc3190_wifi_pwr_lock);
+	__mc3190_mci_setpower(0);
+	msleep(100);
+	__mc3190_mci_setpower(MMC_VDD_33_34);
+	mutex_unlock(&mc3190_wifi_pwr_lock);
+}
+EXPORT_SYMBOL_GPL(mc3190_wifi_power_cycle);
 
 static struct pxamci_platform_data mc3190_mci_platform_data = {		// WiFi
 	.detect_delay_ms	= 200,
@@ -413,11 +486,11 @@ static inline void mc3190_init_mmc(void) {}
 #if defined(CONFIG_KEYBOARD_PXA27x) || defined(CONFIG_KEYBOARD_PXA27x_MODULE)
 static unsigned int mc3190_matrix_key_map[] = {
 	/* KEY(row, col, key_code) */
-	KEY(5, 3, KEY_HOME), 	/* Left green button */
+	KEY(5, 3, KEY_MENU), 	/* Left green button */
  	KEY(0, 1, KEY_BACK),		/* Right red button */
 
 	/* Num Keys */
-	KEY(2, 0, KEY_7), 		  KEY(0, 2, KEY_8), KEY(1, 0, KEY_9),   KEY(0, 3, KEY_MENU), /* Orange Alt Button */
+	KEY(2, 0, KEY_7), 		  KEY(0, 2, KEY_8), KEY(1, 0, KEY_9),   KEY(0, 3, KEY_MACRO), /* Orange Alt Button */
 	KEY(0, 4, KEY_4), 		  KEY(0, 5, KEY_5), KEY(0, 6, KEY_6),   KEY(0, 7, KEY_LEFTSHIFT),
 	KEY(0, 0, KEY_1), 		  KEY(5, 4, KEY_2), KEY(1, 1, KEY_3),   KEY(1, 2, KEY_ENTER), 
 	KEY(1, 3, KEY_BACKSPACE), KEY(1, 4, KEY_0), KEY(1, 5, KEY_DOT),
@@ -437,7 +510,7 @@ static unsigned int mc3190_matrix_key_map_fn[] = {
     /* KEY(2, 0, KEY_7), */           KEY(0, 2, KEY_UP), /*   KEY(1, 0, KEY_9), */  /* KEY(0, 3, KEY_MENU), */
     KEY(0, 4, KEY_LEFT),              KEY(0, 5, KEY_ENTER),   KEY(0, 6, KEY_RIGHT), /* KEY(0, 7, KEY_LEFTSHIFT), */
     /* KEY(0, 0, KEY_1), */           KEY(5, 4, KEY_DOWN), /* KEY(1, 1, KEY_3), */  /* KEY(1, 2, KEY_ENTER), */ 
-    KEY(1, 3, KEY_SPACE),          /* KEY(1, 4, KEY_0), */ /* KEY(1, 5, KEY_DOT), */
+    KEY(1, 3, KEY_TAB),          /* KEY(1, 4, KEY_0), */ /* KEY(1, 5, KEY_DOT), */
 
     /* Letter Keys */
     KEY(1, 6, KEY_LEFTALT),           KEY(1, 7, KEY_F1),      KEY(5, 5, KEY_F2),       KEY(2, 1, KEY_F3),   /* KEY(2, 2, KEY_ALT), */ /* Func button */ 
@@ -467,6 +540,29 @@ static void __init mc3190_init_keypad(void)
 #else
 static inline void mc3190_init_keypad(void) {}
 #endif
+
+#ifdef CONFIG_KEYBOARD_GPIO
+
+static struct gpio_keys_button mc3190_scan_keymap[] = {
+	{KEY_HOME, MC3190_GPIO_SCANYEL,   1, "Front Scan" },
+	{KEY_F14,  MC3190_GPIO_SCANLEFT,  0, "Scan Left" },
+	{KEY_F15,  MC3190_GPIO_SCANRIGHT, 0, "Scan Right" },
+};
+
+static struct gpio_keys_platform_data mc3190_scan_keys_data = {
+	.buttons	= mc3190_scan_keymap,
+	.nbuttons	= ARRAY_SIZE(mc3190_scan_keymap),
+};
+
+static struct platform_device mc3190_scan_keys = {
+	.name	= "gpio-keys",
+	.id	= -1,
+	.dev	= {
+		.platform_data = &mc3190_scan_keys_data,
+	},
+};
+
+#endif // CONFIG_KEYBOARD_GPIO
 
 #if defined(CONFIG_MTD_NAND_PXA3xx) || defined(CONFIG_MTD_NAND_PXA3xx_MODULE)
 static struct mtd_partition mc3190_nand_partitions[] = {
@@ -554,18 +650,22 @@ static int mc3190_udc_is_connected(void)
               MC3190_CPLD_USB_CONNECTED_BIT);
 }
 
+#define MC3190_UP2OCR_PHYS    0x40600020
+#define MC3190_UP2OCR_CLIENT  0x00020008   /* Windows CE USB client mode magic number */
+#define MC3190_UP2OCR_DPPUE   0x00000010   /* D+ pull-up */
+
 static void mc3190_udc_command(int command)
 {
-    switch (command) {
-    case PXA2XX_UDC_CMD_CONNECT:
-		pr_info("%s: PXA2XX_UDC_CMD_CONNECT\n", __func__);
-		// FIXME: Add code
-        break;
-    case PXA2XX_UDC_CMD_DISCONNECT:
-		pr_info("%s: PXA2XX_UDC_CMD_DISCONNECT\n", __func__);
-		// FIXME: Add code
-        break;
-    }
+	void __iomem *up2ocr = (void __iomem *)io_p2v(MC3190_UP2OCR_PHYS);
+	u32 val = MC3190_UP2OCR_CLIENT;
+
+	if (command == PXA2XX_UDC_CMD_CONNECT && mc3190_udc_is_connected())
+		val |= MC3190_UP2OCR_DPPUE;
+
+	__raw_writel(val, up2ocr);
+	pr_info("%s: %s UP2OCR <- 0x%08x (readback 0x%08x)\n", __func__,
+		command == PXA2XX_UDC_CMD_CONNECT ? "CONNECT" : "DISCONNECT",
+		val, __raw_readl(up2ocr));
 }
 
 static struct pxa2xx_udc_mach_info mc3190_udc_info __initdata = {
@@ -575,34 +675,12 @@ static struct pxa2xx_udc_mach_info mc3190_udc_info __initdata = {
 	.udc_command = mc3190_udc_command,
 };
 
-static char *mc3190_usb_functions[] = {
-    "adb",
-};
-
-static struct android_usb_platform_data mc3190_android_usb_pdata = {
-    .vendor_id          = 0x05E0,
-    .product_id         = 0x2001,
-    .version            = 0x0100,
-    .product_name       = "MC3190",
-    .manufacturer_name  = "Symbol Technologies",
-    .serial_number      = "MC3190000001",
-    .num_functions      = ARRAY_SIZE(mc3190_usb_functions),
-    .functions          = mc3190_usb_functions,
-};
-
-static struct platform_device mc3190_android_usb_device = {
-    .name   = "android_usb",
-    .id     = -1,
-    .dev    = {
-        .platform_data = &mc3190_android_usb_pdata,
-    },
-};
-
 static struct platform_device *mc3190_devices[] __initdata = {
 	&pxa_spi_ssp3,
 	&mc3190_pwrmicro_device,
-	&mc3190_android_usb_device,
 	&mc3190_wm9713_audio,
+	&pxa3xx_device_gcu,
+	&mc3190_scan_keys,
 };
 
 static int __init mc3190_cpld_device_init(void)
@@ -638,7 +716,7 @@ static void __init mc3190_init(void)
 	mc3190_init_ohci();
 }
 
-MACHINE_START(MC3190, "Symbol MC3190")
+MACHINE_START(MC3190, "mc3190")
 	.phys_io	= 0x40000000,
 	.boot_params	= 0xA0000100,
 	.io_pg_offst	= (io_p2v(0x40000000) >> 18) & 0xfffc,
