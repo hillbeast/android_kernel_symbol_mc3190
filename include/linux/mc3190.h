@@ -27,6 +27,10 @@
 #define MC3190_GPIO_HOST_PWR  6            /* low in client mode */
 #define MC3190_GPIO_OTG_SEL   84           /* high = shared port 2 */
 
+#define MC3190_GPIO_SCANYEL   106
+#define MC3190_GPIO_SCANLEFT  107
+#define MC3190_GPIO_SCANRIGHT 108
+
 struct mc3190_bl_platform_data {
 	int	pwm_id;
 	unsigned long pwm_period_ns;

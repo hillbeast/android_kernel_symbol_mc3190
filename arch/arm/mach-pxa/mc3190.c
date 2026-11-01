@@ -14,6 +14,7 @@
 
 #include <linux/delay.h>
 #include <linux/gpio.h>
+#include <linux/gpio_keys.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -119,7 +120,9 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 
 	/* Keypad */
 	GPIO105_KP_DKIN_0 | MFP_LPM_EDGE_BOTH,
-	GPIO106_KP_DKIN_1 | MFP_LPM_EDGE_BOTH,
+	GPIO106_GPIO, // GPIO106_KP_DKIN_1 | MFP_LPM_EDGE_BOTH,
+	GPIO107_GPIO, // GPIO107_KP_DKIN_2 | MFP_LPM_EDGE_BOTH,
+	GPIO108_GPIO, // GPIO108_KP_DKIN_3 | MFP_LPM_EDGE_BOTH,
 	GPIO113_KP_MKIN_0 | MFP_LPM_EDGE_BOTH,
 	GPIO114_KP_MKIN_1 | MFP_LPM_EDGE_BOTH,
 	GPIO115_KP_MKIN_2 | MFP_LPM_EDGE_BOTH,
@@ -483,11 +486,11 @@ static inline void mc3190_init_mmc(void) {}
 #if defined(CONFIG_KEYBOARD_PXA27x) || defined(CONFIG_KEYBOARD_PXA27x_MODULE)
 static unsigned int mc3190_matrix_key_map[] = {
 	/* KEY(row, col, key_code) */
-	KEY(5, 3, KEY_HOME), 	/* Left green button */
+	KEY(5, 3, KEY_MENU), 	/* Left green button */
  	KEY(0, 1, KEY_BACK),		/* Right red button */
 
 	/* Num Keys */
-	KEY(2, 0, KEY_7), 		  KEY(0, 2, KEY_8), KEY(1, 0, KEY_9),   KEY(0, 3, KEY_MENU), /* Orange Alt Button */
+	KEY(2, 0, KEY_7), 		  KEY(0, 2, KEY_8), KEY(1, 0, KEY_9),   KEY(0, 3, KEY_MACRO), /* Orange Alt Button */
 	KEY(0, 4, KEY_4), 		  KEY(0, 5, KEY_5), KEY(0, 6, KEY_6),   KEY(0, 7, KEY_LEFTSHIFT),
 	KEY(0, 0, KEY_1), 		  KEY(5, 4, KEY_2), KEY(1, 1, KEY_3),   KEY(1, 2, KEY_ENTER), 
 	KEY(1, 3, KEY_BACKSPACE), KEY(1, 4, KEY_0), KEY(1, 5, KEY_DOT),
@@ -507,7 +510,7 @@ static unsigned int mc3190_matrix_key_map_fn[] = {
     /* KEY(2, 0, KEY_7), */           KEY(0, 2, KEY_UP), /*   KEY(1, 0, KEY_9), */  /* KEY(0, 3, KEY_MENU), */
     KEY(0, 4, KEY_LEFT),              KEY(0, 5, KEY_ENTER),   KEY(0, 6, KEY_RIGHT), /* KEY(0, 7, KEY_LEFTSHIFT), */
     /* KEY(0, 0, KEY_1), */           KEY(5, 4, KEY_DOWN), /* KEY(1, 1, KEY_3), */  /* KEY(1, 2, KEY_ENTER), */ 
-    KEY(1, 3, KEY_SPACE),          /* KEY(1, 4, KEY_0), */ /* KEY(1, 5, KEY_DOT), */
+    KEY(1, 3, KEY_TAB),          /* KEY(1, 4, KEY_0), */ /* KEY(1, 5, KEY_DOT), */
 
     /* Letter Keys */
     KEY(1, 6, KEY_LEFTALT),           KEY(1, 7, KEY_F1),      KEY(5, 5, KEY_F2),       KEY(2, 1, KEY_F3),   /* KEY(2, 2, KEY_ALT), */ /* Func button */ 
@@ -537,6 +540,29 @@ static void __init mc3190_init_keypad(void)
 #else
 static inline void mc3190_init_keypad(void) {}
 #endif
+
+#ifdef CONFIG_KEYBOARD_GPIO
+
+static struct gpio_keys_button mc3190_scan_keymap[] = {
+	{KEY_HOME, MC3190_GPIO_SCANYEL,   1, "Front Scan" },
+	{KEY_F14,  MC3190_GPIO_SCANLEFT,  0, "Scan Left" },
+	{KEY_F15,  MC3190_GPIO_SCANRIGHT, 0, "Scan Right" },
+};
+
+static struct gpio_keys_platform_data mc3190_scan_keys_data = {
+	.buttons	= mc3190_scan_keymap,
+	.nbuttons	= ARRAY_SIZE(mc3190_scan_keymap),
+};
+
+static struct platform_device mc3190_scan_keys = {
+	.name	= "gpio-keys",
+	.id	= -1,
+	.dev	= {
+		.platform_data = &mc3190_scan_keys_data,
+	},
+};
+
+#endif // CONFIG_KEYBOARD_GPIO
 
 #if defined(CONFIG_MTD_NAND_PXA3xx) || defined(CONFIG_MTD_NAND_PXA3xx_MODULE)
 static struct mtd_partition mc3190_nand_partitions[] = {
@@ -654,6 +680,7 @@ static struct platform_device *mc3190_devices[] __initdata = {
 	&mc3190_pwrmicro_device,
 	&mc3190_wm9713_audio,
 	&pxa3xx_device_gcu,
+	&mc3190_scan_keys,
 };
 
 static int __init mc3190_cpld_device_init(void)
