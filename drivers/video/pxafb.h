@@ -1,6 +1,10 @@
 #ifndef __PXAFB_H__
 #define __PXAFB_H__
 
+#ifdef CONFIG_HAS_EARLYSUSPEND
+#include <linux/earlysuspend.h>
+#endif
+
 /*
  * linux/drivers/video/pxafb.h
  *    -- Intel PXA250/210 LCD Controller Frame Buffer Device
@@ -166,6 +170,10 @@ struct pxafb_info {
 
 	void (*lcd_power)(int, struct fb_var_screeninfo *);
 	void (*backlight_power)(int);
+
+#ifdef CONFIG_HAS_EARLYSUSPEND
+	struct early_suspend	early_suspend;
+#endif
 };
 
 #define TO_INF(ptr,member) container_of(ptr,struct pxafb_info,member)

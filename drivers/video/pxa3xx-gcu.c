@@ -1108,12 +1108,73 @@ pxa3xx_gcu_remove(struct platform_device *dev)
 	return 0;
 }
 
+#ifdef CONFIG_PM
+static void pxa3xx_gcu_hw_restore(struct pxa3xx_gcu_priv *priv)
+{
+	gc_writel(priv, REG_GCIECR, 0);
+
+	gc_writel(priv, REG_GCCR, GCCR_ABORT);
+	gc_writel(priv, REG_GCCR, 0);
+
+	gc_writel(priv, REG_GCRBLR, 0);
+	gc_writel(priv, REG_GCRBBR, priv->shared_phys);
+	gc_writel(priv, REG_GCRBTR, priv->shared_phys);
+
+	gc_writel(priv, REG_GCIECR, IE_ALL & ~IE_EOB);
+}
+
+static int pxa3xx_gcu_suspend(struct device *dev)
+{
+	struct pxa3xx_gcu_priv *priv = dev_get_drvdata(dev);
+
+	/* user space is frozen, so no new work can arrive from here on */
+	if (pxa3xx_gcu_quiesce(priv)) {
+		dev_err(dev, "GCU is still busy, refusing to suspend\n");
+		return -EBUSY;
+	}
+
+	gc_writel(priv, REG_GCIECR, 0);
+	clk_disable(priv->clk);
+
+	return 0;
+}
+
+static int pxa3xx_gcu_resume(struct device *dev)
+{
+	struct pxa3xx_gcu_priv *priv = dev_get_drvdata(dev);
+	unsigned long flags;
+	int ret;
+
+	ret = clk_enable(priv->clk);
+	if (ret) {
+		dev_err(dev, "failed to enable the clock on resume: %d\n", ret);
+		return ret;
+	}
+
+	spin_lock_irqsave(&priv->spinlock, flags);
+	pxa3xx_gcu_hw_restore(priv);
+	spin_unlock_irqrestore(&priv->spinlock, flags);
+
+	return 0;
+}
+
+static const struct dev_pm_ops pxa3xx_gcu_pm_ops = {
+	.suspend	= pxa3xx_gcu_suspend,
+	.resume		= pxa3xx_gcu_resume,
+};
+
+#define PXA3XX_GCU_PM_OPS	(&pxa3xx_gcu_pm_ops)
+#else
+#define PXA3XX_GCU_PM_OPS	NULL
+#endif /* CONFIG_PM */
+
 static struct platform_driver pxa3xx_gcu_driver = {
 	.probe	  = pxa3xx_gcu_probe,
 	.remove	 = __devexit_p(pxa3xx_gcu_remove),
 	.driver	 = {
 		.owner  = THIS_MODULE,
 		.name   = DRV_NAME,
+		.pm     = PXA3XX_GCU_PM_OPS,
 	},
 };
 

@@ -1675,6 +1675,27 @@ static const struct dev_pm_ops pxafb_pm_ops = {
 };
 #endif
 
+#ifdef CONFIG_HAS_EARLYSUSPEND
+static void pxafb_early_suspend(struct early_suspend *h)
+{
+	struct pxafb_info *fbi =
+		container_of(h, struct pxafb_info, early_suspend);
+
+	/* let a pending blank/unblank request finish first */
+	flush_work(&fbi->task);
+	set_ctrlr_state(fbi, C_DISABLE);
+}
+
+static void pxafb_late_resume(struct early_suspend *h)
+{
+	struct pxafb_info *fbi =
+		container_of(h, struct pxafb_info, early_suspend);
+
+	flush_work(&fbi->task);
+	set_ctrlr_state(fbi, C_ENABLE);
+}
+#endif /* CONFIG_HAS_EARLYSUSPEND */
+
 static int __devinit pxafb_init_video_memory(struct pxafb_info *fbi)
 {
 	int size = PAGE_ALIGN(fbi->video_mem_size);
@@ -2209,6 +2230,13 @@ static int __devinit pxafb_probe(struct platform_device *dev)
 	 */
 	set_ctrlr_state(fbi, C_ENABLE);
 
+#ifdef CONFIG_HAS_EARLYSUSPEND
+	fbi->early_suspend.level = EARLY_SUSPEND_LEVEL_DISABLE_FB + 1;
+	fbi->early_suspend.suspend = pxafb_early_suspend;
+	fbi->early_suspend.resume = pxafb_late_resume;
+	register_early_suspend(&fbi->early_suspend);
+#endif
+
 	return 0;
 
 failed_free_cmap:
@@ -2248,6 +2276,10 @@ static int __devexit pxafb_remove(struct platform_device *dev)
 		return 0;
 
 	info = &fbi->fb;
+
+#ifdef CONFIG_HAS_EARLYSUSPEND
+	unregister_early_suspend(&fbi->early_suspend);
+#endif
 
 	pxafb_overlay_exit(fbi);
 	unregister_framebuffer(info);
