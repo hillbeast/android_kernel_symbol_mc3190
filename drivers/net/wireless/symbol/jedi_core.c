@@ -64,9 +64,9 @@ MODULE_PARM_DESC(join_mode, "3 = WinCE sequence (default), 0 = BSSID then SSID, 
 bool jedi_dot11d = false;
 module_param_named(dot11d, jedi_dot11d, bool, 0644);
 MODULE_PARM_DESC(dot11d, "802.11d: let the firmware adopt the country seen in beacons (default OFF here: with it on the firmware flips between NZ/US/AU/CN and some joins fail). 0 keeps jedi.country fixed");
-unsigned int jedi_join_settle_ms = 500;
+unsigned int jedi_join_settle_ms = 1000;
 module_param_named(join_settle_ms, jedi_join_settle_ms, uint, 0644);
-MODULE_PARM_DESC(join_settle_ms, "join_mode 3: pause after the disconnect SSID and after the regulatory refresh (WinCE: ~3300; 0 and 250 fail, 500 works; default 500)");
+MODULE_PARM_DESC(join_settle_ms, "join_mode 3: pause after the disconnect SSID and after the regulatory refresh (WinCE: ~1000 in the WPA2 capture, ~3300 in the open one; 0 and 250 fail, 500 works; default 1000)");
 
 bool jedi_send_privacy;
 module_param_named(privacy, jedi_send_privacy, bool, 0644);
@@ -96,9 +96,15 @@ MODULE_PARM_DESC(wmm, "0x13000108: -1 follow the AP's WMM IE (default), 0 or 1 f
 bool jedi_send_suite = true;
 module_param_named(send_suite, jedi_send_suite, bool, 0644);
 MODULE_PARM_DESC(send_suite, "Send 0x1200000b (suite) for secured joins (WinCE did not in one capture)");
-bool jedi_dummy_keys;
+bool jedi_dummy_keys = true;
 module_param_named(dummy_keys, jedi_dummy_keys, bool, 0644);
-MODULE_PARM_DESC(dummy_keys, "Send WinCE's four type-1 0x12000008 broadcast records before each join");
+MODULE_PARM_DESC(dummy_keys, "Send WinCE's four type-1 0x12000008 group-slot clear records before each join (default on)");
+bool jedi_unauth = true;
+module_param_named(unauth, jedi_unauth, bool, 0644);
+MODULE_PARM_DESC(unauth, "Send 0x150007e5 (unauthorise port) with the AP MAC on disconnect (default on)");
+int jedi_cipher_override = -1;
+module_param_named(cipher, jedi_cipher_override, int, 0644);
+MODULE_PARM_DESC(cipher, "Force the 0x12000001 cipher code for WPA joins: 1 WEP, 2 TKIP, 3 AES (-1 = from the supplicant)");
 unsigned int jedi_key_remove_mode = 1;
 module_param_named(key_remove, jedi_key_remove_mode, uint, 0644);
 MODULE_PARM_DESC(key_remove, "Key removal: 1 = 0x1200000a record with type byte 8 (default), 0 = overwrite with a zero key");
@@ -1204,11 +1210,35 @@ static void jedi_remove(struct sdio_func *func)
 	pr_info("jedi: Removed\n");
 }
 
+static int jedi_suspend(struct device *dev)
+{
+    /* FIXME: Currently these are no-ops */
+	/* The module loses power in S2.  Returning 0 lets the core power
+	 * the host off; the card is re-enumerated on resume. */
+	dev_warn(dev, "jedi: jedi_suspend is a no-op\n");
+
+	return 0;
+}
+
+static int jedi_resume(struct device *dev)
+{
+    /* FIXME: Currently these are no-ops */
+	dev_warn(dev, "jedi: jedi_resume is a no-op\n");
+
+	return 0;
+}
+
+static const struct dev_pm_ops jedi_pm_ops = {
+	.suspend	= jedi_suspend,
+	.resume		= jedi_resume,
+};
+
 static struct sdio_driver jedi_driver = {
 	.name     = "jedi",
 	.id_table = jedi_ids,
 	.probe    = jedi_probe,
 	.remove   = jedi_remove,
+	.drv      = { .pm = &jedi_pm_ops },
 };
 
 static int __init jedi_init(void)

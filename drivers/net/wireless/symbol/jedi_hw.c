@@ -372,6 +372,8 @@ void jedi_hw_init(struct jedi_private *priv)
 	jedi_init_set(priv, JEDI_OID_ANT_DIVERSITY, 1);
 	jedi_init_set(priv, JEDI_OID_BT_OPTIONS, 0);
 	jedi_set_u32(priv, JEDI_OID_SEC_MODE, 0);
+	jedi_set_u32(priv, JEDI_OID_SECURITY, 1);	/* RE: start-up value */
+	priv->wx.suite_sent = 1;
 	jedi_hw_log_countries(priv);
 	jedi_uart_poll(priv, "before-mlme");
 	/* WinCE trace findings 4: the config job's SSID is "-NoProfileApplied-",
@@ -673,6 +675,22 @@ int jedi_hw_set_bssid(struct jedi_private *priv, const u8 *bssid)
  * Security suite (R9.3): derived from the SIOCSIWAUTH state. The firmware
  * builds the association IEs from this code; the host runs the handshake.
  */
+/* 0x12000001 value (RE): 0 none, 1 WEP, 2 TKIP, 3 AES-CCMP */
+static u32 jedi_cipher_code(struct jedi_private *priv, bool wpa)
+{
+	u32 c = priv->wx.auth[IW_AUTH_CIPHER_PAIRWISE];
+
+	if (!wpa)
+		return 0;
+	if (jedi_cipher_override >= 0)
+		return jedi_cipher_override;
+	if (c & IW_AUTH_CIPHER_CCMP)
+		return 3;
+	if (c & IW_AUTH_CIPHER_TKIP)
+		return 2;
+	return 3;
+}
+
 static u32 jedi_suite_code(struct jedi_private *priv, bool *wpa)
 {
 	struct jedi_wext *wx = &priv->wx;
@@ -715,7 +733,19 @@ void jedi_hw_port_authorize(struct jedi_private *priv, bool authorized)
 	u8 b[8] = { 0 };
 
 	if (!authorized) {
+		bool was;
+
 		priv->wx.ptk_set = priv->wx.gtk_set = false;
+		mutex_lock(&priv->wx.lock);
+		memcpy(b, priv->wx.cur_bssid, ETH_ALEN);
+		was = priv->wx.connected && !is_zero_ether_addr(b);
+		mutex_unlock(&priv->wx.lock);
+		/* RE: 0x150007e5 is the counterpart of 0x150007e4 */
+		if (jedi_unauth && was) {
+			jedi_dbg(priv->func, "port unauthorise bssid %pM\n", b);
+			jedi_cmd(priv, JEDI_OP_SET, JEDI_OID_PORT_UNAUTH, b, sizeof(b),
+				 NULL, 0, NULL);
+		}
 		return;
 	}
 	priv->port_closed = false;
@@ -895,16 +925,17 @@ static void jedi_hw_join_prepare(struct jedi_private *priv, u32 code, bool wpa,
 	 * unless an earlier join changed it. */
 	if (jedi_wmm_mode >= 0)
 		wmm = jedi_wmm_mode;
-	jedi_dbg(priv->func, "join setup: suite %u%s wpa %d wmm %d dummy_keys %d\n",
-		 code, jedi_send_suite ? "" : " (not sent)", wpa, wmm, jedi_dummy_keys);
+	jedi_dbg(priv->func, "join setup: suite %u%s wpa %d cipher %u wmm %d dummy_keys %d\n",
+		 code, jedi_send_suite ? "" : " (not sent)", wpa,
+		 jedi_cipher_code(priv, wpa), wmm, jedi_dummy_keys);
 	if (jedi_send_suite && (code != 1 || (priv->wx.suite_sent && priv->wx.suite_sent != 1))) {
 		jedi_set_u32(priv, JEDI_OID_SECURITY, code);
 		priv->wx.suite_sent = code;
 	}
 	jedi_init_set(priv, 0x150007e0, 0);
 	jedi_init_set(priv, 0x13000108, wmm ? 1 : 0);
-	jedi_set_u32(priv, 0x12000001, wpa ? 3 : 0);
-	jedi_set_u32(priv, 0x12000002, wpa ? 1 : 0);
+	jedi_set_u32(priv, JEDI_OID_CIPHER, jedi_cipher_code(priv, wpa));
+	jedi_set_u32(priv, JEDI_OID_EXCL_UNENC, wpa ? 1 : 0);
 }
 
 /*
@@ -1019,17 +1050,20 @@ void jedi_handle_trap(struct jedi_private *priv, u32 oid,
 		 * units, 0x6c = 54 Mbps), 0 disconnected, word1 = disconnect
 		 * reason, +0x14 = 1, +0x18 = channel frequency in kHz (0x24e168 =
 		 * 2417 MHz), +0x1c = beacon interval. */
-		u32 w0, w1, rate;
+		u32 w0, w1, mhz;
 
 		if (plen < 8)
 			break;
 		w0 = get_unaligned_le32(p);
 		w1 = get_unaligned_le32(p + 4);
-		rate = plen >= 0x1c ? get_unaligned_le32(p + 0x18) / 1000 : 0;
+		mhz = plen >= 0x1c ? get_unaligned_le32(p + 0x18) / 1000 : 0;
+		mutex_lock(&priv->wx.lock);
+		priv->wx.rate_kbps = w0 * 500;	/* rate code is in 500 kbps units */
+		mutex_unlock(&priv->wx.lock);
 		dev_info(&func->dev,
 			 "jedi: link %s (rate code %u, reason %u, %u MHz) "
 			 "%u ms after join\n",
-			 w0 ? "UP" : "DOWN", w0, w1, rate,
+			 w0 ? "UP" : "DOWN", w0, w1, mhz,
 			 jiffies_to_msecs(jiffies - priv->join_jiffies));
 		/* the layout is not fully known: always show it */
 		jedi_hexdump("jedi: linkstate ",

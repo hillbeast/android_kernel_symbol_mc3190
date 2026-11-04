@@ -178,6 +178,9 @@ struct jedi_private {
 #define JEDI_OID_STA_KEY_RSC	0x1200000a	/* 64 bytes */
 #define JEDI_OID_SECURITY	0x1200000b	/* suite code */
 #define JEDI_OID_PORT_AUTH	0x150007e4	/* 8 bytes: BSSID + 2 zero; after PTK+GTK */
+#define JEDI_OID_PORT_UNAUTH	0x150007e5	/* same payload: close the port (RE) */
+#define JEDI_OID_CIPHER		0x12000001	/* 0 none, 1 WEP, 2 TKIP, 3 AES (RE) */
+#define JEDI_OID_EXCL_UNENC	0x12000002
 #define JEDI_OID_SEC_MODE	0x12000012	/* driver security mode */
 #define JEDI_OID_COUNTRY_LIST	0x1f000001
 #define JEDI_OID_COUNTRY	0x1f000002
@@ -246,7 +249,8 @@ extern unsigned int jedi_rsc_mode;
 extern unsigned int jedi_key_remove_mode;
 int jedi_key_remove(struct jedi_private *priv, const u8 *mac, int idx);
 extern int jedi_wmm_mode;
-extern bool jedi_send_suite, jedi_dummy_keys;
+extern bool jedi_send_suite, jedi_dummy_keys, jedi_unauth;
+extern int jedi_cipher_override;
 extern unsigned int jedi_data_trace;
 extern bool jedi_link_fallback;
 extern bool jedi_ps_kick;
