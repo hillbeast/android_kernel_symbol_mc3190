@@ -211,7 +211,9 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	GPIO30_GPIO,										// Red Notification LED
 	GPIO31_GPIO,										// Green Notification LED
 	GPIO36_GPIO,										// Unused AC97 pin. Could be used as GPIO
-	GPIO57_GPIO,										// Barcode Scanner (unsure on purpose)
+	GPIO49_CI_DD_0 | MFP_PULL_HIGH, 	                // Barcode Scanner Data (AF 1 + Pull Up)
+    GPIO56_CI_DD_7 | MFP_PULL_HIGH,						// Barcode Scanner Start Of Scan
+	GPIO57_GPIO,										// Barcode Scanner Motor Enable
 //	GPIO58_GPIO,						// Not set in Windows. Linux does not have definition for this GPIO
 	GPIO84_GPIO,										// USB OTG Select
 	GPIO97_GPIO,
@@ -220,14 +222,12 @@ static mfp_cfg_t mfp_cfg[] __initdata = {
 	GPIO1_2_GPIO,
 
 	/* Camera Interface (unused but defined) */
-	GPIO49_CI_DD_0,
 	GPIO50_CI_DD_1,
 	GPIO51_CI_DD_2,
 	GPIO52_CI_DD_3,
 	GPIO53_CI_DD_4,
 	GPIO54_CI_DD_5,
 	GPIO55_CI_DD_6,
-	GPIO56_CI_DD_7,
 	GPIO59_CI_MCLK,
 	GPIO60_CI_PCLK,
 	GPIO61_CI_HSYNC,
@@ -675,11 +675,27 @@ static struct pxa2xx_udc_mach_info mc3190_udc_info __initdata = {
 	.udc_command = mc3190_udc_command,
 };
 
+static struct mc3190_scanner_platform_data mc3190_scanner_pdata = {
+    .gpio_motor       	= 57, /* MOTOR_ENABLE_IOPIN */
+    .gpio_sos         	= 56, /* CIF_D7_IOPIN (Start of Scan) */
+    .gpio_data        	= 49, /* CIF_D0_IOPIN (Data) */
+    .motor_active_low 	= 1,  /* MOTOR_ENABLE_OFF_LEVEL = 1 */
+};
+
+static struct platform_device mc3190_scanner_device = {
+    .name          		= "mc3190-scanner",
+    .id            		= -1,
+    .dev = {
+        .platform_data = &mc3190_scanner_pdata,
+    },
+};
+
 static struct platform_device *mc3190_devices[] __initdata = {
 	&mc3190_pwrmicro_device,
 	&mc3190_wm9713_audio,
 	&pxa3xx_device_gcu,
 	&mc3190_scan_keys,
+	&mc3190_scanner_device,
 };
 
 static int __init mc3190_cpld_device_init(void)

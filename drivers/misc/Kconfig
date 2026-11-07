@@ -447,6 +447,14 @@ config USB_SWITCH_FSA9480
 	  stereo and mono audio, video, microphone and UART data to use
 	  a common connector port.
 
+config MC3190_SCANNER
+	tristate "Symbol MC3190 SE-950 1D Laser Scanner"
+	depends on MACH_MC3190
+	---help---
+	  This driver enables support for the Symbol SE-950 1D Laser
+	  Barcode Scanner in the Symbol MC3190 mobile computer.
+
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"

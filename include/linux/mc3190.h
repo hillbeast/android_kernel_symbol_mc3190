@@ -65,6 +65,8 @@ extern void mc3190_wifi_power_cycle(void);
 #define MC3190_CPLD_REG_BL			0x1c
 #define MC3190_CPLD_REG_USB_STATUS	0x24
 #define MC3190_CPLD_REG_AUDIO		0x28
+#define MC3190_CPLD_REG_LASER_1		0x30
+#define MC3190_CPLD_REG_LASER_2		0x34
 #define MC3190_CPLD_REG_WIFI_PWR	0x40
 #define MC3190_CPLD_REG_BT_1		0x44
 #define MC3190_CPLD_REG_BT_2		0x64
@@ -87,6 +89,9 @@ extern void mc3190_wifi_power_cycle(void);
 #define MC3190_CPLD_USB_CONNECTED_BIT	(1 << 5)
 
 #define MC3190_CPLD_AUDIOAMP_BIT		(1 << 1)
+
+#define MC3190_CPLD_REG_LASER_EN_1		(1 << 0)
+#define MC3190_CPLD_REG_LASER_EN_2		((1 << 3) | (1 << 0))
 
 #define MC3190_CPLD_ISR_BTUART_BIT		(1 << 17)
 #define MC3190_CPLD_ISR_USB_BIT			(1 << 21)
@@ -303,5 +308,16 @@ int mc3190_get_battery_temperature(struct mc3190_pwrmicro *priv);
 int mc3190_get_battery_rated_capacity(struct mc3190_pwrmicro *priv);
 int mc3190_get_backup_battery_voltage(struct mc3190_pwrmicro *priv);
 bool mc3190_is_battery_present(struct mc3190_pwrmicro *priv);
+
+/*
+ * Symbol SE-950 1D Laser Scanner
+ */
+
+struct mc3190_scanner_platform_data {
+    int gpio_motor, gpio_sos, gpio_data, motor_active_low;
+    unsigned int  mclk_div;   /* CICR4 DIV, 0 = 18 (WinCE default) */
+    unsigned char sos_mask;   /* 0 = 0x80 */
+    unsigned char dbp_mask;   /* 0 = 0x01 */
+};
 
 #endif // INCLUDE_LINUX_MC3190_H
