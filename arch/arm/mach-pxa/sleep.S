@@ -88,6 +88,11 @@ ENTRY(pxa3xx_cpu_suspend)
 	@ clean data cache
 	bl	xsc3_flush_kern_cache_all
 
+#ifdef CONFIG_MACH_MC3190
+	@ flush the whole L2, it does not survive the sleep
+	bl	pxa3xx_pm_l2_flush
+#endif
+
 	mov	r0, #0x06		@ S2D3C4 mode
 	mcr	p14, 0, r0, c7, c0, 0	@ enter sleep
 
@@ -140,6 +145,13 @@ ENTRY(pxa3xx_cpu_resume)
 	str	r7, [r1, r6, lsl #2]
 
 	ldr	r2, =pxa3xx_resume_after_mmu	@ absolute virtual address
+
+#ifdef CONFIG_MACH_MC3190
+	@ The L2 content was lost with the power: come back with it disabled
+	@ (CR bit 26), it is not safe to enable it without invalidating it.
+	bic	r9, r9, #(1 << 26)
+#endif
+
 	b	resume_turn_on_mmu		@ cache align execution
 
 	.text

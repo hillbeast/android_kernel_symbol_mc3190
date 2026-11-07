@@ -22,6 +22,12 @@
 #include <linux/io.h>
 #include <linux/sysdev.h>
 
+#include <linux/wakelock.h>
+
+#include <asm/setup.h>
+#include <asm/system.h>
+#include <asm/outercache.h>
+
 #include <mach/hardware.h>
 #include <mach/gpio.h>
 #include <mach/pxa3xx-regs.h>
@@ -340,6 +346,149 @@ static void pxa3xx_cpu_standby(unsigned int pwrmode)
 	AD2D1ER = 0;
 }
 
+#ifdef CONFIG_MACH_MC3190
+
+/*
+ * Symbol MC3190 resume protocol
+ * -----------------------------
+ * On wake-up the BootROM jumps to PSPR (0x5c014000), which is the stock
+ * first stage living in iSRAM.  After re-initialising clocks and DDR it
+ * only resumes if all of the following hold, otherwise it cold boots:
+ *
+ *   - [0x80003000] = resume vector (physical, 0x80000000 alias, word
+ *                    aligned, 0x80000000 < addr <= 0x88000000)
+ *   - [0x80003004] = pointer (same rules) to a record { checksum, count,
+ *                    words... } with 1 <= count <= 0x400, where checksum
+ *                    is   sum = 0x5a72; for each word: sum += w;
+ *                    sum = rol32(sum, 1);   over the `count` words that
+ *                    start at the count word itself
+ *   - ARSR & 3 == 0, PSR bit 0 set
+ *   - bytes [0x8000258c] and [0x8000258e] zero (else Ext[1] wake-ups may
+ *     force a cold boot)
+ *
+ * It then writes its verdict to [0x80002514] (1 = reset/gate failed,
+ * 4 = resume, 8 = record rejected) and jumps to the vector with the MMU
+ * off.  All of this memory is the 0x80000000 alias of RAM+0x2000..0x3fff,
+ * which the kernel still uses as normal memory, so every word we touch is
+ * saved before and restored after the sleep.  The first stage reads RAM
+ * with caches off, hence everything is written through an uncached
+ * mapping.
+ */
+#define BOOT_RAM_PHYS		0x80002000	/* alias of RAM + 0x2000 */
+#define BOOT_RAM_SIZE		0x2000
+#define BOOT_ALIAS(pa)		(((pa) & 0x0fffffff) | 0x80000000)
+
+#define BOOT_CAUSE		0x514	/* word,  0x80002514 */
+#define BOOT_FLAG_A		0x58c	/* byte,  0x8000258c */
+#define BOOT_FLAG_B		0x58e	/* byte,  0x8000258e */
+#define BOOT_VECTOR		0x1000	/* word,  0x80003000 */
+#define BOOT_RECORD_PTR		0x1004	/* word,  0x80003004 */
+
+#ifndef CR_L2
+#define CR_L2			(1 << 26)
+#endif
+
+/*
+ * Debug aid: the Android wakelock code suspends again as soon as no wake
+ * lock is held, and "echo mem" leaves the requested state at "mem".  Keep
+ * the system awake for this many seconds after every resume so there is
+ * time to look around over the UART.  0 disables it.  The proper fix is
+ * the power button handler taking a wake lock and reporting KEY_POWER.
+ */
+#define PXA3XX_PM_DEBUG_WAKELOCK_SECS	30
+
+#if PXA3XX_PM_DEBUG_WAKELOCK_SECS
+static struct wake_lock pm_dbg_wake_lock;
+#endif
+
+/* { checksum, count }: checksum = rol32(0x5a72 + 1, 1) for count == 1 */
+static u32 pm_resume_rec[2] __attribute__((aligned(32))) = { 0xb4e6, 1 };
+
+/* uncached alias of RAM + 0x2000 .. 0x3fff, mapped in pxa3xx_init_pm() */
+static void __iomem *boot_ram;
+
+/*
+ * Called from pxa3xx_cpu_suspend (sleep.S) right after the L1 data cache
+ * has been cleaned.  The L2 does not survive the sleep, so everything that
+ * is dirty in it has to reach DRAM.  This simply walks all of RAM: it is
+ * slow (about a second) but correct, it can be replaced by a clean-by-
+ * set/way once those operations are verified.
+ */
+void pxa3xx_pm_l2_flush(void)
+{
+	int i;
+
+	if (!(get_cr() & CR_L2))
+		return;
+
+	for (i = 0; i < meminfo.nr_banks; i++)
+		outer_flush_range(meminfo.bank[i].start,
+				  meminfo.bank[i].start + meminfo.bank[i].size);
+}
+
+static void pxa3xx_cpu_pm_suspend(void)
+{
+	u32 s_cause, s_vector, s_record;
+	u8 s_flag_a, s_flag_b;
+
+	extern void pxa3xx_cpu_suspend(void);
+	extern void pxa3xx_cpu_resume(void);
+
+	/* resuming from D2 requires the HSIO2/BOOT/TPM clocks enabled */
+	CKENA |= (1 << CKEN_BOOT) | (1 << CKEN_TPM);
+	CKENB |= 1 << (CKEN_HSIO2 & 0x1f);
+
+	/* WinCE enables CKEN 10 and 11 (iSRAM related) around the sleep */
+	CKENA |= (1 << 10) | (1 << 11);
+
+	/* clear and setup wakeup source */
+	AD3SR = ~0;
+	AD3ER = wakeup_src;
+	ASCR = ASCR;
+	ARSR = ARSR;
+
+	/* WinCE sets these bits in AD3R before every sleep */
+	AD3R |= 0xb;
+
+	PSPR = 0x5c014000;
+
+	/* save what the kernel keeps in the words the first stage uses */
+	s_cause   = readl(boot_ram + BOOT_CAUSE);
+	s_flag_a  = readb(boot_ram + BOOT_FLAG_A);
+	s_flag_b  = readb(boot_ram + BOOT_FLAG_B);
+	s_vector  = readl(boot_ram + BOOT_VECTOR);
+	s_record  = readl(boot_ram + BOOT_RECORD_PTR);
+
+	writeb(0, boot_ram + BOOT_FLAG_A);
+	writeb(0, boot_ram + BOOT_FLAG_B);
+	writel(0xdeadbeef, boot_ram + BOOT_CAUSE);	/* sentinel */
+	writel(BOOT_ALIAS(virt_to_phys(pxa3xx_cpu_resume)),
+	       boot_ram + BOOT_VECTOR);
+	writel(BOOT_ALIAS(virt_to_phys(pm_resume_rec)),
+	       boot_ram + BOOT_RECORD_PTR);
+
+	pxa3xx_cpu_suspend();
+
+	/* we are back: the first stage handed over to pxa3xx_cpu_resume */
+	pr_info("pm: first stage boot cause %08x, cr %08x\n",
+		readl(boot_ram + BOOT_CAUSE), (unsigned int)get_cr());
+
+#if PXA3XX_PM_DEBUG_WAKELOCK_SECS
+	wake_lock_timeout(&pm_dbg_wake_lock,
+			  PXA3XX_PM_DEBUG_WAKELOCK_SECS * HZ);
+#endif
+
+	writel(s_cause,  boot_ram + BOOT_CAUSE);
+	writeb(s_flag_a, boot_ram + BOOT_FLAG_A);
+	writeb(s_flag_b, boot_ram + BOOT_FLAG_B);
+	writel(s_vector, boot_ram + BOOT_VECTOR);
+	writel(s_record, boot_ram + BOOT_RECORD_PTR);
+
+	AD3ER = 0;
+}
+
+#else
+
 /*
  * NOTE:  currently, the OBM (OEM Boot Module) binary comes along with
  * PXA3xx development kits assumes that the resuming process continues
@@ -379,6 +528,8 @@ static void pxa3xx_cpu_pm_suspend(void)
 
 	AD3ER = 0;
 }
+
+#endif // CONFIG_MACH_MC3190
 
 static void pxa3xx_cpu_pm_enter(suspend_state_t state)
 {
@@ -421,6 +572,19 @@ static void __init pxa3xx_init_pm(void)
 		printk(KERN_ERR "Unable to map ISRAM: disabling standby/suspend\n");
 		return;
 	}
+
+	boot_ram = ioremap_nocache(BOOT_RAM_PHYS, BOOT_RAM_SIZE);
+	if (!boot_ram) {
+		printk(KERN_ERR "Unable to map boot RAM: disabling standby/suspend\n");
+		return;
+	}
+	pr_info("pm: cr %08x, stale 2514=%08x 258c=%02x 258e=%02x\n",
+		(unsigned int)get_cr(), readl(boot_ram + BOOT_CAUSE),
+		readb(boot_ram + BOOT_FLAG_A), readb(boot_ram + BOOT_FLAG_B));
+
+#if PXA3XX_PM_DEBUG_WAKELOCK_SECS
+	wake_lock_init(&pm_dbg_wake_lock, WAKE_LOCK_SUSPEND, "pxa3xx-pm-debug");
+#endif
 
 	/*
 	 * Since we copy wakeup code into the SRAM, we need to ensure
