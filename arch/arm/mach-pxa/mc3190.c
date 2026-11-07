@@ -676,7 +676,6 @@ static struct pxa2xx_udc_mach_info mc3190_udc_info __initdata = {
 };
 
 static struct platform_device *mc3190_devices[] __initdata = {
-	&pxa_spi_ssp3,
 	&mc3190_pwrmicro_device,
 	&mc3190_wm9713_audio,
 	&pxa3xx_device_gcu,
@@ -698,6 +697,8 @@ static void __init mc3190_init(void)
 	pxa3xx_mfp_config(ARRAY_AND_SIZE(mfp_cfg));
 
 	pxa_set_ac97_info(NULL);
+
+	platform_device_register(&pxa_spi_ssp3);
 	mc3190_init_lcd();
 	mc3190_init_mmc();
 	mc3190_init_keypad();
